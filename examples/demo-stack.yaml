@@ -1,0 +1,71 @@
+version: 0.1
+
+stack:
+  name: demo
+  workdir: ./
+
+defaults:
+  restartPolicy:
+    maxRetries: 5
+    backoff:
+      min: 1s
+      max: 30s
+      factor: 2.0
+  health:
+    gracePeriod: 5s
+    interval: 2s
+    timeout: 1s
+    failureThreshold: 3
+
+services:
+  db:
+    image: postgres:16
+    runtime: docker
+    env:
+      POSTGRES_PASSWORD: example
+    ports: ["5432:5432"]
+    health:
+      http:
+        url: http://localhost:5432/healthz
+        expectStatus: [200, 204]
+    update:
+      strategy: rolling
+      maxUnavailable: 0
+      maxSurge: 1
+    replicas: 1
+
+  api:
+    image: ghcr.io/acme/api:latest
+    runtime: docker
+    envFromFile: ./secrets/api.env
+    dependsOn:
+      - target: db
+        require: ready
+        timeout: 60s
+    health:
+      http:
+        url: http://localhost:8080/health
+        expectStatus: [200]
+    ports: ["8080:8080"]
+    replicas: 2
+    restartPolicy:
+      maxRetries: 10
+      backoff:
+        min: 500ms
+        max: 20s
+        factor: 1.8
+
+  web:
+    runtime: process
+    command: ["./web", "--port=3000"]
+    env:
+      API_URL: http://localhost:8080
+    dependsOn:
+      - target: api
+        require: ready
+    health:
+      http:
+        url: http://localhost:3000/healthz
+        expectStatus: [200]
+    ports: ["3000:3000"]
+    replicas: 1

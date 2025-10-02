@@ -2,6 +2,21 @@
 
 Orco is a single-node orchestration engine that delivers most of the ergonomics of a modern orchestrator without the overhead of running a full Kubernetes control plane. It focuses on dependency-aware startup, health-gated restarts, structured logging, and progressive rollout strategies for services defined in a declarative `stack.yaml` file.
 
+## Getting started
+
+The repository now includes a Go implementation of the Orco CLI. To experiment with the parser and planning utilities:
+
+1. Build the binary: `go build ./cmd/orco`
+2. Run commands against the sample manifest in `examples/demo-stack.yaml`, for example:
+
+   ```bash
+   ./orco --file examples/demo-stack.yaml status
+   ./orco --file examples/demo-stack.yaml graph --dot
+   ./orco --file examples/demo-stack.yaml up
+   ```
+
+These commands currently validate the stack definition, construct the dependency DAG, and display planning information while the execution engine is developed. Future work will add real runtimes, health gating, and supervisors on top of this foundation.
+
 ## Problem statement
 
 Traditional tooling such as `docker-compose` is optimized for "bring up these services" but leaves orchestration concerns to operators. This leads to awkward limitations:
