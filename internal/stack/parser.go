@@ -41,8 +41,12 @@ func (s *StackFile) ApplyDefaults() error {
 		if svc.RestartPolicy == nil && s.Defaults.RestartPolicy != nil {
 			svc.RestartPolicy = s.Defaults.RestartPolicy.Clone()
 		}
-		if svc.Health == nil && s.Defaults.Health != nil {
-			svc.Health = s.Defaults.Health.Clone()
+		if s.Defaults.Health != nil {
+			if svc.Health == nil {
+				svc.Health = s.Defaults.Health.Clone()
+			} else {
+				svc.Health.ApplyDefaults(s.Defaults.Health)
+			}
 		}
 	}
 	return nil
