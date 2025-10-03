@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/example/orco/internal/engine"
+	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/runtime"
 	"github.com/example/orco/internal/stack"
 )
@@ -270,6 +271,10 @@ func (i *mockInstance) WaitReady(ctx stdcontext.Context) error {
 		i.runtime.recordReady(i.name)
 		return nil
 	}
+}
+
+func (i *mockInstance) Health() <-chan probe.State {
+	return nil
 }
 
 func (i *mockInstance) Stop(ctx stdcontext.Context) error {

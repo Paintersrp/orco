@@ -14,6 +14,27 @@ import (
 	"github.com/example/orco/internal/stack"
 )
 
+// Status captures the readiness condition surfaced by a probe runner.
+type Status string
+
+const (
+	// StatusUnknown is used internally to track transitions and is not
+	// emitted on the public channel.
+	StatusUnknown Status = "unknown"
+	// StatusReady indicates that the probe has satisfied the configured
+	// success threshold.
+	StatusReady Status = "ready"
+	// StatusUnready indicates that the probe has exceeded the configured
+	// failure threshold.
+	StatusUnready Status = "unready"
+)
+
+// State describes a readiness state transition emitted by Watch.
+type State struct {
+	Status Status
+	Err    error
+}
+
 // Runner executes readiness probes defined by a stack.Health specification.
 type Runner struct {
 	health     *stack.Health
@@ -104,6 +125,98 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 }
 
+// Watch continuously executes the configured probe until the provided context
+// is cancelled. State transitions are emitted onto the supplied channel each
+// time the probe moves between Ready and Unready conditions. The method blocks
+// until the context is cancelled.
+func (r *Runner) Watch(ctx context.Context, events chan<- State) {
+	if ctx == nil {
+		return
+	}
+	if r == nil || r.health == nil {
+		sendState(ctx, events, State{Status: StatusReady})
+		<-ctx.Done()
+		return
+	}
+
+	h := r.health
+	successNeeded := h.SuccessThreshold
+	if successNeeded <= 0 {
+		successNeeded = 1
+	}
+	failureAllowed := h.FailureThreshold
+	if failureAllowed <= 0 {
+		failureAllowed = 1
+	}
+	interval := h.Interval.Duration
+
+	if gp := h.GracePeriod.Duration; gp > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(gp):
+		}
+	}
+
+	successes := 0
+	failures := 0
+	var lastErr error
+	status := StatusUnknown
+
+	for {
+		attemptCtx := ctx
+		cancel := func() {}
+		if pt := r.probeTimeout(); pt > 0 {
+			attemptCtx, cancel = context.WithTimeout(ctx, pt)
+		}
+
+		err := r.execute(attemptCtx)
+		cancel()
+
+		if err == nil {
+			successes++
+			failures = 0
+			if successes >= successNeeded && status != StatusReady {
+				if !sendState(ctx, events, State{Status: StatusReady}) {
+					return
+				}
+				status = StatusReady
+			}
+		} else {
+			if ctx.Err() != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
+			}
+			successes = 0
+			failures++
+			lastErr = err
+			if failures >= failureAllowed && status != StatusUnready {
+				eventErr := fmt.Errorf("probe failed after %d consecutive errors: %w", failures, lastErr)
+				if !sendState(ctx, events, State{Status: StatusUnready, Err: eventErr}) {
+					return
+				}
+				status = StatusUnready
+			}
+		}
+
+		if interval <= 0 {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+	}
+}
+
 func (r *Runner) execute(ctx context.Context) error {
 	switch {
 	case r.health.HTTP != nil:
@@ -180,4 +293,16 @@ func (r *Runner) runCommand(ctx context.Context, probe *stack.CommandProbe) erro
 		return fmt.Errorf("command probe failed: %w", err)
 	}
 	return nil
+}
+
+func sendState(ctx context.Context, events chan<- State, state State) bool {
+	if events == nil {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case events <- state:
+		return true
+	}
 }
