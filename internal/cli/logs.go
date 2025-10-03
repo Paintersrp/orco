@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/example/orco/internal/cliutil"
 	"github.com/example/orco/internal/engine"
 )
 
@@ -46,7 +47,7 @@ func newLogsCmd(ctx *context) *cobra.Command {
 					if filter != "" && event.Service != filter {
 						continue
 					}
-					encodeLogEvent(encoder, cmd.ErrOrStderr(), event)
+					cliutil.EncodeLogEvent(encoder, cmd.ErrOrStderr(), event)
 				}
 			}()
 

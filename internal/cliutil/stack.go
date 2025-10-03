@@ -1,4 +1,4 @@
-package cli
+package cliutil
 
 import (
 	"fmt"
@@ -8,13 +8,15 @@ import (
 	"github.com/example/orco/internal/stack"
 )
 
-type stackDocument struct {
+// StackDocument bundles a parsed stack file with the derived dependency graph.
+type StackDocument struct {
 	File   *stack.StackFile
 	Graph  *engine.Graph
 	Source string
 }
 
-func loadStackFromFile(path string) (*stackDocument, error) {
+// LoadStackFromFile parses a stack definition file and returns its document and graph.
+func LoadStackFromFile(path string) (*StackDocument, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open stack file: %w", err)
@@ -29,5 +31,5 @@ func loadStackFromFile(path string) (*stackDocument, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &stackDocument{File: doc, Graph: graph, Source: path}, nil
+	return &StackDocument{File: doc, Graph: graph, Source: path}, nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/example/orco/internal/cliutil"
 	"github.com/example/orco/internal/engine"
 )
 
@@ -71,7 +72,7 @@ func printEvents(stdout, stderr io.Writer, events <-chan engine.Event) {
 	for event := range events {
 		switch event.Type {
 		case engine.EventTypeLog:
-			encodeLogEvent(encoder, stderr, event)
+			cliutil.EncodeLogEvent(encoder, stderr, event)
 		case engine.EventTypeError:
 			if event.Err != nil {
 				fmt.Fprintf(stderr, "error: %s %s: %v\n", event.Service, event.Message, event.Err)
