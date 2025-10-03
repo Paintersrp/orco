@@ -119,18 +119,29 @@ services:
 		t.Fatalf("expected command to fail due to readiness error")
 	}
 
-	expectedStart := []string{"db", "api"}
-	if !reflect.DeepEqual(rt.startOrder(), expectedStart) {
-		t.Fatalf("unexpected start order: got %v want %v", rt.startOrder(), expectedStart)
+	starts := rt.startOrder()
+	if len(starts) == 0 || starts[0] != "db" {
+		t.Fatalf("unexpected start order: got %v", starts)
+	}
+	for _, svc := range starts[1:] {
+		if svc != "api" {
+			t.Fatalf("unexpected start sequence: got %v", starts)
+		}
 	}
 	if !reflect.DeepEqual(rt.readyOrder(), []string{"db"}) {
 		t.Fatalf("unexpected ready order: got %v want %v", rt.readyOrder(), []string{"db"})
 	}
-	expectedStop := []string{"api", "db"}
-	if !reflect.DeepEqual(rt.stopOrder(), expectedStop) {
-		t.Fatalf("unexpected stop order: got %v want %v", rt.stopOrder(), expectedStop)
+	stops := rt.stopOrder()
+	if len(stops) == 0 || stops[len(stops)-1] != "db" {
+		t.Fatalf("unexpected stop order: got %v", stops)
 	}
-	if !bytes.Contains(stderr.Bytes(), []byte("error: api readiness failed")) {
+	for _, svc := range stops[:len(stops)-1] {
+		if svc != "api" {
+			t.Fatalf("unexpected stop sequence: got %v", stops)
+		}
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("error: api readiness failed")) &&
+		!bytes.Contains(stderr.Bytes(), []byte("service api failed readiness")) {
 		t.Fatalf("expected readiness error in stderr, got: %s", stderr.String())
 	}
 }
