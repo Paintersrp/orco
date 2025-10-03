@@ -45,6 +45,11 @@ type supervisor struct {
 	readyOnce sync.Once
 	readyCh   chan error
 
+	existsOnce  sync.Once
+	existsCh    chan error
+	startedOnce sync.Once
+	startedCh   chan error
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -61,12 +66,14 @@ type supervisor struct {
 
 func newSupervisor(name string, svc *stack.Service, rt runtime.Runtime, events chan<- Event) *supervisor {
 	sup := &supervisor{
-		name:    name,
-		service: svc,
-		runtime: rt,
-		events:  events,
-		readyCh: make(chan error, 1),
-		done:    make(chan struct{}),
+		name:      name,
+		service:   svc,
+		runtime:   rt,
+		events:    events,
+		readyCh:   make(chan error, 1),
+		existsCh:  make(chan error, 1),
+		startedCh: make(chan error, 1),
+		done:      make(chan struct{}),
 	}
 
 	sup.policy = deriveRestartPolicy(svc)
@@ -152,11 +159,14 @@ func (s *supervisor) Start(ctx context.Context) {
 func (s *supervisor) run() {
 	defer close(s.done)
 
+	s.deliverExists(nil)
+
 	restarts := 0
 	backoffBase := s.policy.min
 
 	for {
 		if err := s.ctx.Err(); err != nil {
+			s.deliverStarted(err)
 			s.deliverInitial(err)
 			s.setRunErr(err)
 			return
@@ -167,6 +177,7 @@ func (s *supervisor) run() {
 		instance, err := s.runtime.Start(s.ctx, s.name, s.service)
 		if err != nil {
 			if s.ctx.Err() != nil {
+				s.deliverStarted(s.ctx.Err())
 				s.deliverInitial(s.ctx.Err())
 				s.setRunErr(s.ctx.Err())
 				return
@@ -174,6 +185,7 @@ func (s *supervisor) run() {
 
 			sendEvent(s.events, s.name, EventTypeCrashed, "start failed", err)
 			if !s.allowRestart(restarts) {
+				s.deliverStarted(err)
 				s.deliverInitial(err)
 				s.setRunErr(err)
 				return
@@ -181,6 +193,7 @@ func (s *supervisor) run() {
 
 			restarts++
 			if err := s.sleepBackoff(&backoffBase); err != nil {
+				s.deliverStarted(err)
 				s.deliverInitial(err)
 				s.setRunErr(err)
 				return
@@ -188,6 +201,7 @@ func (s *supervisor) run() {
 			continue
 		}
 
+		s.deliverStarted(nil)
 		s.setCurrent(instance)
 		instErr, ready := s.manageInstance(instance)
 		s.clearCurrent()
@@ -419,6 +433,44 @@ func (s *supervisor) deliverInitial(err error) {
 		s.readyCh <- err
 		close(s.readyCh)
 	})
+}
+
+func (s *supervisor) deliverExists(err error) {
+	s.existsOnce.Do(func() {
+		s.existsCh <- err
+		close(s.existsCh)
+	})
+}
+
+func (s *supervisor) AwaitExists(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-s.existsCh:
+		return err
+	}
+}
+
+func (s *supervisor) deliverStarted(err error) {
+	s.startedOnce.Do(func() {
+		s.startedCh <- err
+		close(s.startedCh)
+	})
+}
+
+func (s *supervisor) AwaitStarted(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-s.startedCh:
+		return err
+	}
 }
 
 func (s *supervisor) AwaitReady(ctx context.Context) error {

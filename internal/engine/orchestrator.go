@@ -58,6 +58,36 @@ type Deployment struct {
 type serviceHandle struct {
 	name       string
 	supervisor *supervisor
+
+	existsOnce sync.Once
+	existsErr  error
+
+	startedOnce sync.Once
+	startedErr  error
+
+	readyOnce sync.Once
+	readyErr  error
+}
+
+func (h *serviceHandle) awaitExists(ctx context.Context) error {
+	h.existsOnce.Do(func() {
+		h.existsErr = h.supervisor.AwaitExists(ctx)
+	})
+	return h.existsErr
+}
+
+func (h *serviceHandle) awaitStarted(ctx context.Context) error {
+	h.startedOnce.Do(func() {
+		h.startedErr = h.supervisor.AwaitStarted(ctx)
+	})
+	return h.startedErr
+}
+
+func (h *serviceHandle) awaitReady(ctx context.Context) error {
+	h.readyOnce.Do(func() {
+		h.readyErr = h.supervisor.AwaitReady(ctx)
+	})
+	return h.readyErr
 }
 
 // Up launches services described by the stack in topological order. Events are
@@ -71,11 +101,13 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 		return nil, errors.New("dependency graph is nil")
 	}
 
-	deployment := &Deployment{handles: make([]*serviceHandle, 0, len(graph.Services()))}
-
 	services := graph.Services()
-	for i := len(services) - 1; i >= 0; i-- {
-		name := services[i]
+	if len(services) == 0 {
+		return &Deployment{handles: nil}, nil
+	}
+
+	handles := make(map[string]*serviceHandle, len(services))
+	for _, name := range services {
 		svc, ok := doc.Services[name]
 		if !ok {
 			return nil, fmt.Errorf("service %s missing from stack", name)
@@ -86,13 +118,63 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 		}
 
 		sup := newSupervisor(name, svc, runtimeImpl, events)
-		sup.Start(ctx)
+		handles[name] = &serviceHandle{name: name, supervisor: sup}
+	}
 
-		handle := &serviceHandle{name: name, supervisor: sup}
+	deployment := &Deployment{handles: make([]*serviceHandle, 0, len(services))}
+
+	for i := len(services) - 1; i >= 0; i-- {
+		name := services[i]
+		handle := handles[name]
+		svc := doc.Services[name]
+
+		for _, dep := range svc.DependsOn {
+			depHandle, ok := handles[dep.Target]
+			if !ok {
+				return nil, fmt.Errorf("service %s references unknown dependency %q", name, dep.Target)
+			}
+
+			require := dep.Require
+			if require == "" {
+				require = "ready"
+			}
+
+			waitCtx := ctx
+			var cancel context.CancelFunc
+			if dep.Timeout.Duration > 0 {
+				waitCtx, cancel = context.WithTimeout(ctx, dep.Timeout.Duration)
+			}
+
+			var err error
+			switch require {
+			case "ready":
+				err = depHandle.awaitReady(waitCtx)
+			case "started":
+				err = depHandle.awaitStarted(waitCtx)
+			case "exists":
+				err = depHandle.awaitExists(waitCtx)
+			default:
+				err = fmt.Errorf("unknown require value %q", require)
+			}
+			if cancel != nil {
+				cancel()
+			}
+			if err != nil {
+				blockErr := fmt.Errorf("service %s blocked waiting for %s (%s): %w", name, dep.Target, require, err)
+				if cleanupErr := cleanupDeployment(deployment, events); cleanupErr != nil {
+					blockErr = fmt.Errorf("%w (cleanup failed: %v)", blockErr, cleanupErr)
+				}
+				return nil, blockErr
+			}
+		}
+
+		handle.supervisor.Start(ctx)
 		deployment.handles = append(deployment.handles, handle)
+	}
 
-		if err := sup.AwaitReady(ctx); err != nil {
-			readyErr := fmt.Errorf("service %s failed readiness: %w", name, err)
+	for _, handle := range deployment.handles {
+		if err := handle.awaitReady(ctx); err != nil {
+			readyErr := fmt.Errorf("service %s failed readiness: %w", handle.name, err)
 			if cleanupErr := cleanupDeployment(deployment, events); cleanupErr != nil {
 				readyErr = fmt.Errorf("%w (cleanup failed: %v)", readyErr, cleanupErr)
 			}
