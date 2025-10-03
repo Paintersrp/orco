@@ -2,11 +2,15 @@ package process
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	stdruntime "runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -274,4 +278,117 @@ func TestStartSetsWorkingDirectory(t *testing.T) {
 	if observed != workdir {
 		t.Fatalf("working directory mismatch: got %q want %q", observed, workdir)
 	}
+}
+
+func TestStopTerminatesProcessGroup(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("process runtime tests skipped on windows")
+	}
+
+	tempDir := t.TempDir()
+	parentPIDPath := filepath.Join(tempDir, "parent.pid")
+	childPIDPath := filepath.Join(tempDir, "child.pid")
+	scriptPath := filepath.Join(tempDir, "parent.sh")
+
+	script := "#!/bin/sh\n" +
+		"set -e\n" +
+		"parent_pid_file=\"$1\"\n" +
+		"child_pid_file=\"$2\"\n" +
+		"echo $$ > \"$parent_pid_file\"\n" +
+		"( sleep 60 ) &\n" +
+		"child=$!\n" +
+		"echo $child > \"$child_pid_file\"\n" +
+		"wait\n"
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write parent script: %v", err)
+	}
+
+	svc := &stack.Service{
+		Runtime: "process",
+		Command: []string{scriptPath, parentPIDPath, childPIDPath},
+	}
+
+	inst, err := New().Start(context.Background(), "process-group", svc)
+	if err != nil {
+		t.Fatalf("start service: %v", err)
+	}
+	procInst, ok := inst.(*processInstance)
+	if !ok {
+		t.Fatalf("expected *processInstance, got %T", inst)
+	}
+
+	waitForPID := func(path string) int {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			data, err := os.ReadFile(path)
+			if err == nil {
+				pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
+				if convErr != nil {
+					t.Fatalf("parse pid from %s: %v", path, convErr)
+				}
+				return pid
+			}
+			if !os.IsNotExist(err) {
+				t.Fatalf("read pid file %s: %v", path, err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", path)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	parentPID := waitForPID(parentPIDPath)
+	childPID := waitForPID(childPIDPath)
+
+	if err := syscall.Kill(parentPID, 0); err != nil {
+		t.Fatalf("parent process not running: %v", err)
+	}
+	if err := syscall.Kill(childPID, 0); err != nil {
+		t.Fatalf("child process not running: %v", err)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	if err := procInst.Stop(stopCtx); err != nil {
+		t.Logf("process stop returned error: %v", err)
+	}
+
+	waitForExit := func(pid int) {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			running := true
+			if err := syscall.Kill(pid, 0); err != nil {
+				if errors.Is(err, syscall.ESRCH) {
+					running = false
+				} else {
+					t.Fatalf("check pid %d: %v", pid, err)
+				}
+			} else {
+				statusPath := fmt.Sprintf("/proc/%d/stat", pid)
+				if data, err := os.ReadFile(statusPath); err == nil {
+					fields := strings.Fields(string(data))
+					if len(fields) > 2 && fields[2] == "Z" {
+						running = false
+					}
+				} else if os.IsNotExist(err) {
+					running = false
+				} else {
+					t.Fatalf("read status for pid %d: %v", pid, err)
+				}
+			}
+
+			if !running {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for pid %d to exit", pid)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	waitForExit(parentPID)
+	waitForExit(childPID)
 }

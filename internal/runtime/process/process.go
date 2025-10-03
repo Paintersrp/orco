@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
-	"time"
 
 	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/runtime"
@@ -54,6 +52,8 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 	if err != nil {
 		return nil, fmt.Errorf("service %s stderr: %w", name, err)
 	}
+
+	configureCmdSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start service %s: %w", name, err)
@@ -160,34 +160,6 @@ func (p *processInstance) WaitReady(ctx context.Context) error {
 
 func (p *processInstance) Health() <-chan probe.State {
 	return p.healthCh
-}
-
-func (p *processInstance) Stop(ctx context.Context) error {
-	p.cancelWatch()
-	if p.cmd.Process == nil {
-		return nil
-	}
-	// Attempt a graceful shutdown first.
-	_ = p.cmd.Process.Signal(syscall.SIGTERM)
-
-	select {
-	case err, ok := <-p.waitErr:
-		if ok {
-			return err
-		}
-		return nil
-	case <-time.After(2 * time.Second):
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("kill process %s: %w", p.name, err)
-	}
-	if err, ok := <-p.waitErr; ok {
-		return err
-	}
-	return nil
 }
 
 func (p *processInstance) Logs() <-chan runtime.LogEntry {
