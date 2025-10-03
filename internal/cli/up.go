@@ -18,7 +18,7 @@ func newUpCmd(ctx *context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "up",
 		Short: "Start services defined in the stack",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (retErr error) {
 			doc, err := ctx.loadStack()
 			if err != nil {
 				return err
@@ -31,27 +31,36 @@ func newUpCmd(ctx *context) *cobra.Command {
 				defer printer.Done()
 				printEvents(cmd.OutOrStdout(), cmd.ErrOrStderr(), events)
 			}()
+
+			var deployment *engine.Deployment
 			defer func() {
+				if deployment != nil {
+					stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
+					if err := deployment.Stop(stopCtx, events); err != nil {
+						if retErr == nil {
+							retErr = err
+						}
+					} else {
+						fmt.Fprintln(cmd.OutOrStdout(), "Services shut down cleanly.")
+					}
+					cancel()
+				}
 				close(events)
 				printer.Wait()
 			}()
 
 			orch := ctx.getOrchestrator()
-			deployment, err := orch.Up(cmd.Context(), doc.File, doc.Graph, events)
+			dep, err := orch.Up(cmd.Context(), doc.File, doc.Graph, events)
 			if err != nil {
 				return err
 			}
+			deployment = dep
 
 			fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
 
-			stopCtx, cancel := stdcontext.WithTimeout(cmd.Context(), 10*time.Second)
-			defer cancel()
-			if err := deployment.Stop(stopCtx, events); err != nil {
-				return err
-			}
+			<-cmd.Context().Done()
 
-			fmt.Fprintln(cmd.OutOrStdout(), "Services shut down cleanly.")
-			return nil
+			return retErr
 		},
 	}
 	return cmd

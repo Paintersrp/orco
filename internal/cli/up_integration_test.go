@@ -53,6 +53,15 @@ services:
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 
+	runCtx, cancel := stdcontext.WithCancel(stdcontext.Background())
+	defer cancel()
+	cmd.SetContext(runCtx)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("up command failed: %v\nstderr: %s", err, stderr.String())
 	}
