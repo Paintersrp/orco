@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/runtime"
 	"github.com/example/orco/internal/stack"
 )
@@ -18,13 +17,13 @@ type EventType string
 
 const (
 	EventTypeStarting EventType = "starting"
-	EventTypeStarted  EventType = "started"
 	EventTypeReady    EventType = "ready"
 	EventTypeStopping EventType = "stopping"
 	EventTypeStopped  EventType = "stopped"
 	EventTypeLog      EventType = "log"
 	EventTypeError    EventType = "error"
 	EventTypeUnready  EventType = "unready"
+	EventTypeCrashed  EventType = "crashed"
 )
 
 // Event represents a single lifecycle or log notification.
@@ -51,16 +50,14 @@ func NewOrchestrator(reg runtime.Registry) *Orchestrator {
 // Deployment tracks state for services started by the orchestrator.
 type Deployment struct {
 	handles []*serviceHandle
-	logs    sync.WaitGroup
-	health  sync.WaitGroup
 
 	stopOnce sync.Once
 	stopErr  error
 }
 
 type serviceHandle struct {
-	name     string
-	instance runtime.Instance
+	name       string
+	supervisor *supervisor
 }
 
 // Up launches services described by the stack in topological order. Events are
@@ -88,41 +85,18 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			return nil, fmt.Errorf("service %s references unsupported runtime %q", name, svc.Runtime)
 		}
 
-		sendEvent(events, name, EventTypeStarting, "starting service", nil)
-		instance, err := runtimeImpl.Start(ctx, name, svc)
-		if err != nil {
-			sendEvent(events, name, EventTypeError, "start failed", err)
-			startErr := fmt.Errorf("start service %s: %w", name, err)
-			if cleanupErr := cleanupDeployment(deployment, events); cleanupErr != nil {
-				startErr = fmt.Errorf("%w (cleanup failed: %v)", startErr, cleanupErr)
-			}
-			return nil, startErr
-		}
-		handle := &serviceHandle{name: name, instance: instance}
+		sup := newSupervisor(name, svc, runtimeImpl, events)
+		sup.Start(ctx)
+
+		handle := &serviceHandle{name: name, supervisor: sup}
 		deployment.handles = append(deployment.handles, handle)
 
-		sendEvent(events, name, EventTypeStarted, "service started", nil)
-		if logCh := instance.Logs(); logCh != nil {
-			deployment.logs.Add(1)
-			go streamLogs(name, logCh, events, &deployment.logs)
-		}
-
-		healthCh := instance.Health()
-		if healthCh != nil {
-			deployment.health.Add(1)
-			go streamHealth(name, healthCh, events, &deployment.health)
-		}
-
-		if err := instance.WaitReady(ctx); err != nil {
-			sendEvent(events, name, EventTypeError, "readiness failed", err)
+		if err := sup.AwaitReady(ctx); err != nil {
 			readyErr := fmt.Errorf("service %s failed readiness: %w", name, err)
 			if cleanupErr := cleanupDeployment(deployment, events); cleanupErr != nil {
 				readyErr = fmt.Errorf("%w (cleanup failed: %v)", readyErr, cleanupErr)
 			}
 			return nil, readyErr
-		}
-		if healthCh == nil {
-			sendEvent(events, name, EventTypeReady, "service ready", nil)
 		}
 	}
 
@@ -137,17 +111,14 @@ func (d *Deployment) Stop(ctx context.Context, events chan<- Event) error {
 		for i := len(d.handles) - 1; i >= 0; i-- {
 			handle := d.handles[i]
 			sendEvent(events, handle.name, EventTypeStopping, "stopping service", nil)
-			if err := handle.instance.Stop(ctx); err != nil {
+			if err := handle.supervisor.Stop(ctx); err != nil {
 				sendEvent(events, handle.name, EventTypeError, "stop failed", err)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("stop service %s: %w", handle.name, err)
 				}
 				continue
 			}
-			sendEvent(events, handle.name, EventTypeStopped, "service stopped", nil)
 		}
-		d.logs.Wait()
-		d.health.Wait()
 		d.stopErr = firstErr
 	})
 	return d.stopErr
@@ -172,24 +143,5 @@ func sendEvent(events chan<- Event, service string, t EventType, message string,
 		Type:      t,
 		Message:   message,
 		Err:       err,
-	}
-}
-
-func streamLogs(service string, logs <-chan string, events chan<- Event, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for line := range logs {
-		sendEvent(events, service, EventTypeLog, line, nil)
-	}
-}
-
-func streamHealth(service string, health <-chan probe.State, events chan<- Event, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for state := range health {
-		switch state.Status {
-		case probe.StatusReady:
-			sendEvent(events, service, EventTypeReady, "service ready", nil)
-		case probe.StatusUnready:
-			sendEvent(events, service, EventTypeUnready, "service unready", state.Err)
-		}
 	}
 }
