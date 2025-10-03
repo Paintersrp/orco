@@ -54,17 +54,18 @@ type ServiceMap map[string]*Service
 
 // Service describes an individual runnable unit.
 type Service struct {
-	Image         string            `yaml:"image"`
-	Runtime       string            `yaml:"runtime"`
-	Command       []string          `yaml:"command"`
-	Env           map[string]string `yaml:"env"`
-	EnvFromFile   string            `yaml:"envFromFile"`
-	Ports         []string          `yaml:"ports"`
-	DependsOn     []Dependency      `yaml:"dependsOn"`
-	Health        *Health           `yaml:"health"`
-	Update        *UpdatePolicy     `yaml:"update"`
-	Replicas      int               `yaml:"replicas"`
-	RestartPolicy *RestartPolicy    `yaml:"restartPolicy"`
+	Image           string            `yaml:"image"`
+	Runtime         string            `yaml:"runtime"`
+	Command         []string          `yaml:"command"`
+	Env             map[string]string `yaml:"env"`
+	EnvFromFile     string            `yaml:"envFromFile"`
+	Ports           []string          `yaml:"ports"`
+	DependsOn       []Dependency      `yaml:"dependsOn"`
+	Health          *Health           `yaml:"health"`
+	Update          *UpdatePolicy     `yaml:"update"`
+	Replicas        int               `yaml:"replicas"`
+	RestartPolicy   *RestartPolicy    `yaml:"restartPolicy"`
+	ResolvedWorkdir string            `yaml:"-"`
 }
 
 // Dependency defines an edge in the service DAG.
