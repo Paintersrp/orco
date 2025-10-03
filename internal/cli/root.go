@@ -12,7 +12,6 @@ import (
 	"github.com/example/orco/internal/runtime/process"
 )
 
-// NewRootCmd constructs the root command.
 func NewRootCmd() *cobra.Command {
 	var stackFile string
 
@@ -24,7 +23,8 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
-	root.PersistentFlags().StringVarP(&stackFile, "file", "f", "stack.yaml", "Path to stack definition")
+	root.PersistentFlags().
+		StringVarP(&stackFile, "file", "f", "stack.yaml", "Path to stack definition")
 
 	ctx := &context{stackFile: &stackFile}
 	root.AddCommand(newUpCmd(ctx))
