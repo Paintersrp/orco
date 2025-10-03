@@ -5,6 +5,11 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/example/orco/internal/engine"
+	"github.com/example/orco/internal/runtime"
+	"github.com/example/orco/internal/runtime/docker"
+	"github.com/example/orco/internal/runtime/process"
 )
 
 // NewRootCmd constructs the root command.
@@ -45,9 +50,20 @@ func Execute() {
 }
 
 type context struct {
-	stackFile *string
+	stackFile    *string
+	orchestrator *engine.Orchestrator
 }
 
 func (c *context) loadStack() (*stackDocument, error) {
 	return loadStackFromFile(*c.stackFile)
+}
+
+func (c *context) getOrchestrator() *engine.Orchestrator {
+	if c.orchestrator == nil {
+		c.orchestrator = engine.NewOrchestrator(runtime.Registry{
+			"docker":  docker.New(),
+			"process": process.New(),
+		})
+	}
+	return c.orchestrator
 }
