@@ -177,3 +177,54 @@ func TestWaitReadyBlocksUntilProbeSuccess(t *testing.T) {
 		t.Fatalf("db re-ready event returned error: %v", dbReadyAgain.Err)
 	}
 }
+
+func TestStartPreservesBaseEnvironment(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("process runtime tests skipped on windows")
+	}
+
+	expectedPath := os.Getenv("PATH")
+	if expectedPath == "" {
+		t.Skip("PATH is unset in test environment")
+	}
+
+	svc := &stack.Service{
+		Runtime: "process",
+		Command: []string{"/bin/sh", "-c", "echo $PATH"},
+	}
+
+	inst, err := New().Start(context.Background(), "env-check", svc)
+	if err != nil {
+		t.Fatalf("start service: %v", err)
+	}
+	procInst, ok := inst.(*processInstance)
+	if !ok {
+		t.Fatalf("expected *processInstance, got %T", inst)
+	}
+
+	logs := inst.Logs()
+	if logs == nil {
+		t.Fatalf("logs channel is nil")
+	}
+
+	select {
+	case entry, ok := <-logs:
+		if !ok {
+			t.Fatalf("logs channel closed before emitting output")
+		}
+		if entry.Message != expectedPath {
+			t.Fatalf("PATH mismatch: got %q want %q", entry.Message, expectedPath)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for log output")
+	}
+
+	select {
+	case err := <-procInst.waitErr:
+		if err != nil {
+			t.Fatalf("process exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for process exit")
+	}
+}
