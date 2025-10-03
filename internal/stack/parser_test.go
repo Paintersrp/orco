@@ -135,6 +135,58 @@ func TestStackFileValidateErrorsIncludePaths(t *testing.T) {
 	}
 }
 
+func TestValidateHealthProbeRequiredFields(t *testing.T) {
+	baseStack := func() StackFile {
+		return StackFile{
+			Version: "0.1",
+			Stack:   StackMeta{Name: "test"},
+			Services: ServiceMap{
+				"app": {
+					Runtime:  "docker",
+					Replicas: 1,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		health *Health
+		want   string
+	}{
+		{
+			name:   "http url required",
+			health: &Health{HTTP: &HTTPProbe{}},
+			want:   "services.app.health.http.url: is required",
+		},
+		{
+			name:   "tcp address required",
+			health: &Health{TCP: &TCPProbe{}},
+			want:   "services.app.health.tcp.address: is required",
+		},
+		{
+			name:   "cmd command required",
+			health: &Health{Command: &CommandProbe{}},
+			want:   "services.app.health.cmd.command: must contain at least one entry",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sf := baseStack()
+			sf.Services["app"].Health = tc.health
+
+			err := sf.Validate()
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("unexpected error, got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplyDefaultsMergesHealth(t *testing.T) {
 	input := `version: 0.1
 stack:

@@ -105,12 +105,21 @@ func validateHealth(name string, h *Health) error {
 	probes := 0
 	if h.HTTP != nil {
 		probes++
+		if h.HTTP.URL == "" {
+			return fmt.Errorf("%s: is required", healthField(name, "http", "url"))
+		}
 	}
 	if h.TCP != nil {
 		probes++
+		if h.TCP.Address == "" {
+			return fmt.Errorf("%s: is required", healthField(name, "tcp", "address"))
+		}
 	}
 	if h.Command != nil {
 		probes++
+		if len(h.Command.Command) == 0 {
+			return fmt.Errorf("%s: must contain at least one entry", healthField(name, "cmd", "command"))
+		}
 	}
 	if probes > 1 {
 		return fmt.Errorf("%s: multiple probe types configured; only one is supported in v0.1", healthField(name))
@@ -132,6 +141,9 @@ func validateHealth(name string, h *Health) error {
 	}
 	if h.SuccessThreshold == 0 {
 		h.SuccessThreshold = 1
+	}
+	if h.Command != nil && h.Command.Timeout.Duration == 0 {
+		h.Command.Timeout = h.Timeout
 	}
 	return nil
 }
