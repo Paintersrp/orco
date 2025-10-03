@@ -63,11 +63,11 @@ func newLogsCmd(ctx *context) *cobra.Command {
 				<-cmd.Context().Done()
 			}
 
-			stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
-			defer cancel()
 			var stopErr error
 			if deployment != nil {
+				stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
 				stopErr = deployment.Stop(stopCtx, events)
+				cancel()
 			}
 
 			close(events)

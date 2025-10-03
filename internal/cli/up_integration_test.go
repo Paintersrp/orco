@@ -93,6 +93,87 @@ services:
 	}
 }
 
+func TestUpCommandStopsDeploymentBeforeExitOnCancel(t *testing.T) {
+	t.Parallel()
+
+	stopRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(stopRelease)
+		})
+	}
+	t.Cleanup(release)
+
+	rt := newBlockingRuntime(stopRelease)
+
+	stackPath := writeStackFile(t, `version: "0.1"
+stack:
+  name: "demo"
+  workdir: "."
+services:
+  api:
+    runtime: process
+    command: ["sleep", "0"]
+`)
+
+	ctx := &context{
+		stackFile:    &stackPath,
+		orchestrator: engine.NewOrchestrator(runtime.Registry{"process": rt}),
+	}
+
+	cmd := newUpCmd(ctx)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	runCtx, cancel := stdcontext.WithCancel(stdcontext.Background())
+	defer cancel()
+	cmd.SetContext(runCtx)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Execute()
+	}()
+
+	select {
+	case <-rt.readyCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timeout waiting for service readiness")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case <-rt.stopStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("expected deployment stop to begin after cancellation")
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("command exited before stop completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("up command failed: %v\nstderr: %s", err, stderr.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("command did not exit after allowing stop to finish")
+	}
+
+	if !bytes.Contains(stdout.Bytes(), []byte("Services shut down cleanly.")) {
+		t.Fatalf("expected shutdown message in stdout, got: %s", stdout.String())
+	}
+}
+
 func TestUpCommandPropagatesRuntimeErrors(t *testing.T) {
 	t.Parallel()
 
@@ -164,6 +245,67 @@ func writeStackFile(t *testing.T, contents string) string {
 		t.Fatalf("write stack file: %v", err)
 	}
 	return path
+}
+
+type blockingRuntime struct {
+	readyCh     chan struct{}
+	readyOnce   sync.Once
+	stopStarted chan struct{}
+	stopOnce    sync.Once
+	stopRelease <-chan struct{}
+}
+
+func newBlockingRuntime(stopRelease <-chan struct{}) *blockingRuntime {
+	return &blockingRuntime{
+		readyCh:     make(chan struct{}),
+		stopStarted: make(chan struct{}),
+		stopRelease: stopRelease,
+	}
+}
+
+func (b *blockingRuntime) Start(ctx stdcontext.Context, name string, svc *stack.Service) (runtime.Instance, error) {
+	_ = name
+	_ = svc
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		b.readyOnce.Do(func() {
+			close(b.readyCh)
+		})
+	}()
+	return &blockingInstance{runtime: b}, nil
+}
+
+type blockingInstance struct {
+	runtime *blockingRuntime
+}
+
+func (i *blockingInstance) WaitReady(ctx stdcontext.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-i.runtime.readyCh:
+		return nil
+	}
+}
+
+func (i *blockingInstance) Health() <-chan probe.State {
+	return nil
+}
+
+func (i *blockingInstance) Stop(ctx stdcontext.Context) error {
+	i.runtime.stopOnce.Do(func() {
+		close(i.runtime.stopStarted)
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-i.runtime.stopRelease:
+		return nil
+	}
+}
+
+func (i *blockingInstance) Logs() <-chan runtime.LogEntry {
+	return nil
 }
 
 type mockRuntime struct {

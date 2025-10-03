@@ -33,6 +33,12 @@ func newUpCmd(ctx *context) *cobra.Command {
 				printEvents(cmd.OutOrStdout(), cmd.ErrOrStderr(), events)
 			}()
 
+			runCtx, runCancel := stdcontext.WithCancel(stdcontext.WithoutCancel(cmd.Context()))
+			defer runCancel()
+
+			cancelGuard := stdcontext.AfterFunc(cmd.Context(), runCancel)
+			defer cancelGuard()
+
 			var deployment *engine.Deployment
 			defer func() {
 				if deployment != nil {
@@ -51,11 +57,12 @@ func newUpCmd(ctx *context) *cobra.Command {
 			}()
 
 			orch := ctx.getOrchestrator()
-			dep, err := orch.Up(cmd.Context(), doc.File, doc.Graph, events)
-			if err != nil {
-				return err
+			var depErr error
+			deployment, depErr = orch.Up(runCtx, doc.File, doc.Graph, events)
+			cancelGuard()
+			if depErr != nil {
+				return depErr
 			}
-			deployment = dep
 
 			fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
 
