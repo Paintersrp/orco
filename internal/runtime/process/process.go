@@ -32,13 +32,16 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 	}
 
 	cmd := exec.CommandContext(ctx, svc.Command[0], svc.Command[1:]...)
+
+	env := os.Environ()
 	if svc.Env != nil {
-		env := make([]string, 0, len(svc.Env))
+		envOverrides := make([]string, 0, len(svc.Env))
 		for k, v := range svc.Env {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
+			envOverrides = append(envOverrides, fmt.Sprintf("%s=%s", k, v))
 		}
-		cmd.Env = append(cmd.Env, env...)
+		env = append(env, envOverrides...)
 	}
+	cmd.Env = env
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
