@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/stack"
 )
 
@@ -12,6 +13,11 @@ type Instance interface {
 	// WaitReady blocks until the instance is considered ready or the
 	// provided context is cancelled.
 	WaitReady(ctx context.Context) error
+
+	// Health returns a channel that delivers readiness transitions for the
+	// instance. A nil channel indicates that the runtime does not surface
+	// health information beyond the initial readiness gate.
+	Health() <-chan probe.State
 
 	// Stop terminates the instance. Implementations should be idempotent
 	// and safe to call multiple times.

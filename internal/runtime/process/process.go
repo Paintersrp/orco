@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -60,6 +61,20 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 		health:  svc.Health.Clone(),
 	}
 
+	if inst.health != nil {
+		inst.healthCh = make(chan probe.State, 1)
+		inst.readyCh = make(chan struct{})
+		inst.readyErr = make(chan error, 1)
+		inst.watchCtx, inst.watchCancel = context.WithCancel(context.Background())
+
+		stateCh := make(chan probe.State, 1)
+		go func() {
+			defer close(stateCh)
+			probe.NewRunner(inst.health).Watch(inst.watchCtx, stateCh)
+		}()
+		go inst.observeHealth(stateCh)
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go inst.streamLogs(stdout, &wg)
@@ -83,10 +98,21 @@ type processInstance struct {
 	logs    chan string
 	waitErr chan error
 	health  *stack.Health
+
+	watchCtx    context.Context
+	watchCancel context.CancelFunc
+
+	healthCh chan probe.State
+
+	readyCh      chan struct{}
+	readyErr     chan error
+	readyOnce    sync.Once
+	readyErrOnce sync.Once
+	initialReady atomic.Bool
 }
 
 func (p *processInstance) WaitReady(ctx context.Context) error {
-	if p.health == nil {
+	if p.health == nil || p.readyCh == nil {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -103,30 +129,18 @@ func (p *processInstance) WaitReady(ctx context.Context) error {
 		}
 	}
 
-	runner := probe.NewRunner(p.health)
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	resultCh := make(chan error, 1)
-	go func() {
-		resultCh <- runner.Run(runCtx)
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
-			cancel()
-			if err := <-resultCh; err != nil && !errors.Is(err, context.Canceled) {
-				// Swallow probe errors when the caller cancelled.
-			}
 			return ctx.Err()
-		case err := <-resultCh:
-			return err
-		case err, ok := <-p.waitErr:
-			cancel()
-			if probeErr := <-resultCh; probeErr != nil && !errors.Is(probeErr, context.Canceled) {
-				// Prefer process exit details below.
+		case err := <-p.readyErr:
+			if err == nil {
+				return errors.New("probe reported unready before initial readiness")
 			}
+			return err
+		case <-p.readyCh:
+			return nil
+		case err, ok := <-p.waitErr:
 			if !ok {
 				return errors.New("process wait channel closed unexpectedly")
 			}
@@ -138,7 +152,12 @@ func (p *processInstance) WaitReady(ctx context.Context) error {
 	}
 }
 
+func (p *processInstance) Health() <-chan probe.State {
+	return p.healthCh
+}
+
 func (p *processInstance) Stop(ctx context.Context) error {
+	p.cancelWatch()
 	if p.cmd.Process == nil {
 		return nil
 	}
@@ -175,5 +194,50 @@ func (p *processInstance) streamLogs(r io.Reader, wg *sync.WaitGroup) {
 	for scanner.Scan() {
 		line := strings.TrimRight(scanner.Text(), "\n")
 		p.logs <- line
+	}
+}
+
+func (p *processInstance) observeHealth(states <-chan probe.State) {
+	defer close(p.healthCh)
+	for {
+		select {
+		case <-p.watchCtx.Done():
+			return
+		case state, ok := <-states:
+			if !ok {
+				return
+			}
+			if state.Status == probe.StatusReady {
+				if p.initialReady.CompareAndSwap(false, true) {
+					p.readyOnce.Do(func() { close(p.readyCh) })
+				}
+			} else if state.Status == probe.StatusUnready {
+				if !p.initialReady.Load() {
+					err := state.Err
+					if err == nil {
+						err = errors.New("probe reported unready before initial readiness")
+					}
+					p.readyErrOnce.Do(func() {
+						select {
+						case p.readyErr <- err:
+						default:
+						}
+					})
+				}
+			}
+
+			select {
+			case p.healthCh <- state:
+			case <-p.watchCtx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (p *processInstance) cancelWatch() {
+	if p.watchCancel != nil {
+		p.watchCancel()
+		p.watchCancel = nil
 	}
 }

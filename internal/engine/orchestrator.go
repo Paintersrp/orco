@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/runtime"
 	"github.com/example/orco/internal/stack"
 )
@@ -23,6 +24,7 @@ const (
 	EventTypeStopped  EventType = "stopped"
 	EventTypeLog      EventType = "log"
 	EventTypeError    EventType = "error"
+	EventTypeUnready  EventType = "unready"
 )
 
 // Event represents a single lifecycle or log notification.
@@ -50,6 +52,7 @@ func NewOrchestrator(reg runtime.Registry) *Orchestrator {
 type Deployment struct {
 	handles []*serviceHandle
 	logs    sync.WaitGroup
+	health  sync.WaitGroup
 
 	stopOnce sync.Once
 	stopErr  error
@@ -104,6 +107,12 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			go streamLogs(name, logCh, events, &deployment.logs)
 		}
 
+		healthCh := instance.Health()
+		if healthCh != nil {
+			deployment.health.Add(1)
+			go streamHealth(name, healthCh, events, &deployment.health)
+		}
+
 		if err := instance.WaitReady(ctx); err != nil {
 			sendEvent(events, name, EventTypeError, "readiness failed", err)
 			readyErr := fmt.Errorf("service %s failed readiness: %w", name, err)
@@ -112,7 +121,9 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			}
 			return nil, readyErr
 		}
-		sendEvent(events, name, EventTypeReady, "service ready", nil)
+		if healthCh == nil {
+			sendEvent(events, name, EventTypeReady, "service ready", nil)
+		}
 	}
 
 	return deployment, nil
@@ -136,6 +147,7 @@ func (d *Deployment) Stop(ctx context.Context, events chan<- Event) error {
 			sendEvent(events, handle.name, EventTypeStopped, "service stopped", nil)
 		}
 		d.logs.Wait()
+		d.health.Wait()
 		d.stopErr = firstErr
 	})
 	return d.stopErr
@@ -167,5 +179,17 @@ func streamLogs(service string, logs <-chan string, events chan<- Event, wg *syn
 	defer wg.Done()
 	for line := range logs {
 		sendEvent(events, service, EventTypeLog, line, nil)
+	}
+}
+
+func streamHealth(service string, health <-chan probe.State, events chan<- Event, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for state := range health {
+		switch state.Status {
+		case probe.StatusReady:
+			sendEvent(events, service, EventTypeReady, "service ready", nil)
+		case probe.StatusUnready:
+			sendEvent(events, service, EventTypeUnready, "service unready", state.Err)
+		}
 	}
 }
