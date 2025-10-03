@@ -1,8 +1,11 @@
 package cli
 
 import (
+	stdcontext "context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -44,7 +47,13 @@ func NewRootCmd() *cobra.Command {
 
 // Execute runs the CLI entrypoint.
 func Execute() {
-	if err := NewRootCmd().Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(stdcontext.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	root := NewRootCmd()
+	root.SetContext(ctx)
+
+	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
