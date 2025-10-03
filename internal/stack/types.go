@@ -187,6 +187,28 @@ func (h *Health) Clone() *Health {
 	return &cp
 }
 
+// ApplyDefaults merges non-zero default thresholds and durations into h.
+func (h *Health) ApplyDefaults(def *Health) {
+	if h == nil || def == nil {
+		return
+	}
+	if h.GracePeriod.Duration == 0 && def.GracePeriod.Duration != 0 {
+		h.GracePeriod = def.GracePeriod
+	}
+	if h.Interval.Duration == 0 && def.Interval.Duration != 0 {
+		h.Interval = def.Interval
+	}
+	if h.Timeout.Duration == 0 && def.Timeout.Duration != 0 {
+		h.Timeout = def.Timeout
+	}
+	if h.FailureThreshold == 0 && def.FailureThreshold != 0 {
+		h.FailureThreshold = def.FailureThreshold
+	}
+	if h.SuccessThreshold == 0 && def.SuccessThreshold != 0 {
+		h.SuccessThreshold = def.SuccessThreshold
+	}
+}
+
 // Clone creates a deep copy of the restart policy.
 func (r *RestartPolicy) Clone() *RestartPolicy {
 	if r == nil {
