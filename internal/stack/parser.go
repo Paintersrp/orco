@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -55,20 +56,20 @@ func (s *StackFile) ApplyDefaults() error {
 // Validate enforces schema invariants.
 func (s *StackFile) Validate() error {
 	if s.Version == "" {
-		return fmt.Errorf("version is required")
+		return fmt.Errorf("%s: is required", fieldPath("version"))
 	}
 	if len(s.Services) == 0 {
-		return fmt.Errorf("at least one service must be defined")
+		return fmt.Errorf("%s: must define at least one service", fieldPath("services"))
 	}
 	if s.Stack.Name == "" {
-		return fmt.Errorf("stack.name is required")
+		return fmt.Errorf("%s: is required", fieldPath("stack", "name"))
 	}
 	for name, svc := range s.Services {
 		if svc.Runtime == "" {
-			return fmt.Errorf("service %s missing runtime", name)
+			return fmt.Errorf("%s: is required", serviceField(name, "runtime"))
 		}
 		if svc.Runtime != "docker" && svc.Runtime != "process" {
-			return fmt.Errorf("service %s has unsupported runtime %q", name, svc.Runtime)
+			return fmt.Errorf("%s: unsupported runtime %q (supported values: docker, process)", serviceField(name, "runtime"), svc.Runtime)
 		}
 		if svc.Health != nil {
 			if err := validateHealth(name, svc.Health); err != nil {
@@ -76,24 +77,24 @@ func (s *StackFile) Validate() error {
 			}
 		}
 		if svc.Replicas < 1 {
-			return fmt.Errorf("service %s must have at least one replica", name)
+			return fmt.Errorf("%s: must be at least 1", serviceField(name, "replicas"))
 		}
 		if svc.RestartPolicy != nil && svc.RestartPolicy.Backoff != nil {
 			if svc.RestartPolicy.Backoff.Factor == 0 {
-				return fmt.Errorf("service %s backoff factor must be non-zero", name)
+				return fmt.Errorf("%s: must be non-zero", serviceField(name, "restartPolicy", "backoff", "factor"))
 			}
 		}
 		for i, dep := range svc.DependsOn {
 			if dep.Target == "" {
-				return fmt.Errorf("service %s dependency %d missing target", name, i)
+				return fmt.Errorf("%s: is required", dependencyField(name, i, "target"))
 			}
 			switch dep.Require {
 			case "", "ready", "started", "exists":
 			default:
-				return fmt.Errorf("service %s dependency %s has invalid require=%s", name, dep.Target, dep.Require)
+				return fmt.Errorf("%s: invalid value %q (expected one of: ready, started, exists)", dependencyField(name, i, "require"), dep.Require)
 			}
 			if _, ok := s.Services[dep.Target]; !ok {
-				return fmt.Errorf("service %s dependency %s references unknown service", name, dep.Target)
+				return fmt.Errorf("%s: references unknown service %q", dependencyField(name, i, "target"), dep.Target)
 			}
 		}
 	}
@@ -112,10 +113,10 @@ func validateHealth(name string, h *Health) error {
 		probes++
 	}
 	if probes > 1 {
-		return fmt.Errorf("service %s defines multiple probe types; only one supported in v0.1", name)
+		return fmt.Errorf("%s: multiple probe types configured; only one is supported in v0.1", healthField(name))
 	}
 	if probes == 0 {
-		return fmt.Errorf("service %s health block present but no probe configured", name)
+		return fmt.Errorf("%s: probe configuration is required", healthField(name))
 	}
 	if h.FailureThreshold == 0 {
 		h.FailureThreshold = 3
@@ -143,4 +144,24 @@ func (s *StackFile) ServicesSorted() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func fieldPath(parts ...string) string {
+	return strings.Join(parts, ".")
+}
+
+func serviceField(service string, parts ...string) string {
+	pathParts := append([]string{"services", service}, parts...)
+	return fieldPath(pathParts...)
+}
+
+func dependencyField(service string, index int, parts ...string) string {
+	dep := fmt.Sprintf("dependsOn[%d]", index)
+	pathParts := append([]string{dep}, parts...)
+	return serviceField(service, pathParts...)
+}
+
+func healthField(service string, parts ...string) string {
+	pathParts := append([]string{"health"}, parts...)
+	return serviceField(service, pathParts...)
 }

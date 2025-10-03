@@ -50,6 +50,91 @@ func TestStackFileValidateRejectsUnsupportedRuntime(t *testing.T) {
 	}
 }
 
+func TestStackFileValidateErrorsIncludePaths(t *testing.T) {
+	baseStack := func() StackFile {
+		return StackFile{
+			Version: "0.1",
+			Stack:   StackMeta{Name: "test"},
+			Services: ServiceMap{
+				"app": {
+					Runtime:  "docker",
+					Replicas: 1,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		modify func(sf *StackFile)
+		want   string
+	}{
+		{
+			name: "missing version",
+			modify: func(sf *StackFile) {
+				sf.Version = ""
+			},
+			want: "version",
+		},
+		{
+			name: "missing stack name",
+			modify: func(sf *StackFile) {
+				sf.Stack.Name = ""
+			},
+			want: "stack.name",
+		},
+		{
+			name: "missing runtime",
+			modify: func(sf *StackFile) {
+				sf.Services["app"].Runtime = ""
+			},
+			want: "services.app.runtime",
+		},
+		{
+			name: "invalid dependency require",
+			modify: func(sf *StackFile) {
+				sf.Services["db"] = &Service{Runtime: "docker", Replicas: 1}
+				sf.Services["app"].DependsOn = []Dependency{{Target: "db", Require: "invalid"}}
+			},
+			want: "services.app.dependsOn[0].require",
+		},
+		{
+			name: "missing dependency target",
+			modify: func(sf *StackFile) {
+				sf.Services["app"].DependsOn = []Dependency{{Require: "ready"}}
+			},
+			want: "services.app.dependsOn[0].target",
+		},
+		{
+			name: "multiple health probes",
+			modify: func(sf *StackFile) {
+				sf.Services["app"].Health = &Health{HTTP: &HTTPProbe{}, TCP: &TCPProbe{}}
+			},
+			want: "services.app.health",
+		},
+		{
+			name: "replicas below minimum",
+			modify: func(sf *StackFile) {
+				sf.Services["app"].Replicas = 0
+			},
+			want: "services.app.replicas",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sf := baseStack()
+			tc.modify(&sf)
+
+			if err := sf.Validate(); err == nil {
+				t.Fatalf("expected error")
+			} else if got := err.Error(); !strings.Contains(got, tc.want) {
+				t.Fatalf("expected error to contain %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestApplyDefaultsMergesHealth(t *testing.T) {
 	input := `version: 0.1
 stack:
