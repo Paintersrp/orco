@@ -32,6 +32,9 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 	}
 
 	cmd := exec.CommandContext(ctx, svc.Command[0], svc.Command[1:]...)
+	if svc.ResolvedWorkdir != "" {
+		cmd.Dir = svc.ResolvedWorkdir
+	}
 
 	env := os.Environ()
 	if svc.Env != nil {

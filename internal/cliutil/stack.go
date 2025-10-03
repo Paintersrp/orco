@@ -3,6 +3,7 @@ package cliutil
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/example/orco/internal/engine"
 	"github.com/example/orco/internal/stack"
@@ -27,6 +28,28 @@ func LoadStackFromFile(path string) (*StackDocument, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve stack path: %w", err)
+	}
+	stackDir := filepath.Dir(absPath)
+	resolvedWorkdir := stackDir
+	if doc.Stack.Workdir != "" {
+		if filepath.IsAbs(doc.Stack.Workdir) {
+			resolvedWorkdir = filepath.Clean(doc.Stack.Workdir)
+		} else {
+			resolvedWorkdir = filepath.Clean(filepath.Join(stackDir, doc.Stack.Workdir))
+		}
+	}
+
+	for _, svc := range doc.Services {
+		if svc == nil {
+			continue
+		}
+		svc.ResolvedWorkdir = resolvedWorkdir
+	}
+
 	graph, err := engine.BuildGraph(doc)
 	if err != nil {
 		return nil, err

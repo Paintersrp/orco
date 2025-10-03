@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	stdruntime "runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -226,5 +227,51 @@ func TestStartPreservesBaseEnvironment(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for process exit")
+	}
+}
+
+func TestStartSetsWorkingDirectory(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("process runtime tests skipped on windows")
+	}
+
+	stackDir := t.TempDir()
+	workdir := filepath.Join(stackDir, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatalf("create workdir: %v", err)
+	}
+	outputPath := filepath.Join(workdir, "pwd.txt")
+
+	svc := &stack.Service{
+		Runtime:         "process",
+		Command:         []string{"/bin/sh", "-c", "pwd > pwd.txt"},
+		ResolvedWorkdir: workdir,
+	}
+
+	inst, err := New().Start(context.Background(), "workdir-check", svc)
+	if err != nil {
+		t.Fatalf("start service: %v", err)
+	}
+	procInst, ok := inst.(*processInstance)
+	if !ok {
+		t.Fatalf("expected *processInstance, got %T", inst)
+	}
+
+	select {
+	case err := <-procInst.waitErr:
+		if err != nil {
+			t.Fatalf("process exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for process exit")
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read observed working directory: %v", err)
+	}
+	observed := strings.TrimSpace(string(data))
+	if observed != workdir {
+		t.Fatalf("working directory mismatch: got %q want %q", observed, workdir)
 	}
 }
