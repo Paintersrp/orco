@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/stack"
@@ -23,10 +24,10 @@ type Instance interface {
 	// and safe to call multiple times.
 	Stop(ctx context.Context) error
 
-	// Logs returns a channel of log lines associated with the instance. The
-	// channel should be closed once the instance has stopped. A nil channel
-	// indicates that the runtime does not provide log streaming.
-	Logs() <-chan string
+	// Logs returns a channel of log entries associated with the instance.
+	// The channel should be closed once the instance has stopped. A nil
+	// channel indicates that the runtime does not provide log streaming.
+	Logs() <-chan LogEntry
 }
 
 // Runtime describes a backend capable of launching services.
@@ -36,6 +37,36 @@ type Runtime interface {
 	// and surface failures via returned errors.
 	Start(ctx context.Context, name string, svc *stack.Service) (Instance, error)
 }
+
+// LogEntry represents a single line of log output emitted by an instance.
+type LogEntry struct {
+	// Message contains the raw log payload.
+	Message string
+
+	// Source identifies the origin of the message, such as stdout, stderr,
+	// or an internal Orco component.
+	Source string
+
+	// Level expresses the semantic severity associated with the entry.
+	// Implementations may leave this empty to request default normalization.
+	Level string
+
+	// Timestamp captures the emission time as observed by the runtime. If
+	// zero, higher layers will substitute their own timestamp during
+	// normalization.
+	Timestamp time.Time
+}
+
+const (
+	// LogSourceStdout indicates the entry originated from standard output.
+	LogSourceStdout = "stdout"
+
+	// LogSourceStderr indicates the entry originated from standard error.
+	LogSourceStderr = "stderr"
+
+	// LogSourceSystem identifies log lines synthesized by Orco itself.
+	LogSourceSystem = "orco"
+)
 
 // Registry maps runtime identifiers to their concrete implementations.
 type Registry map[string]Runtime

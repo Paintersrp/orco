@@ -2,6 +2,7 @@ package cli
 
 import (
 	stdcontext "context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -57,10 +58,11 @@ func newUpCmd(ctx *context) *cobra.Command {
 }
 
 func printEvents(stdout, stderr io.Writer, events <-chan engine.Event) {
+	encoder := json.NewEncoder(stdout)
 	for event := range events {
 		switch event.Type {
 		case engine.EventTypeLog:
-			fmt.Fprintf(stdout, "[%s] %s\n", event.Service, event.Message)
+			encodeLogEvent(encoder, stderr, event)
 		case engine.EventTypeError:
 			if event.Err != nil {
 				fmt.Fprintf(stderr, "error: %s %s: %v\n", event.Service, event.Message, event.Err)

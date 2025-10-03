@@ -21,7 +21,7 @@ func TestUpCommandStartsServicesInDependencyOrder(t *testing.T) {
 	t.Parallel()
 
 	rt := newMockRuntime()
-	rt.logs["db"] = []string{"database online"}
+	rt.logs["db"] = []runtime.LogEntry{{Message: "database online", Source: runtime.LogSourceStdout}}
 
 	stackPath := writeStackFile(t, `version: "0.1"
 stack:
@@ -75,8 +75,9 @@ services:
 	if !bytes.Contains(stdout.Bytes(), []byte("Services shut down cleanly.")) {
 		t.Fatalf("expected shutdown message in stdout, got: %s", stdout.String())
 	}
-	if !bytes.Contains(stdout.Bytes(), []byte("[db] database online")) {
-		t.Fatalf("expected log output in stdout, got: %s", stdout.String())
+	if !bytes.Contains(stdout.Bytes(), []byte("\"service\":\"db\"")) ||
+		!bytes.Contains(stdout.Bytes(), []byte("\"msg\":\"database online\"")) {
+		t.Fatalf("expected structured log output in stdout, got: %s", stdout.String())
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected no stderr output, got: %s", stderr.String())
@@ -165,7 +166,7 @@ type mockRuntime struct {
 	startErr  map[string]error
 	waitErr   map[string]error
 	stopErr   map[string]error
-	logs      map[string][]string
+	logs      map[string][]runtime.LogEntry
 	autoReady bool
 }
 
@@ -175,7 +176,7 @@ func newMockRuntime() *mockRuntime {
 		startErr:  make(map[string]error),
 		waitErr:   make(map[string]error),
 		stopErr:   make(map[string]error),
-		logs:      make(map[string][]string),
+		logs:      make(map[string][]runtime.LogEntry),
 		autoReady: true,
 	}
 }
@@ -191,11 +192,11 @@ func (m *mockRuntime) Start(ctx stdcontext.Context, name string, svc *stack.Serv
 	m.readyCh[name] = readyCh
 	waitErr := m.waitErr[name]
 	stopErr := m.stopErr[name]
-	logLines := append([]string(nil), m.logs[name]...)
+	logLines := append([]runtime.LogEntry(nil), m.logs[name]...)
 	autoReady := m.autoReady
 	m.mu.Unlock()
 
-	logsCh := make(chan string, len(logLines))
+	logsCh := make(chan runtime.LogEntry, len(logLines))
 	for _, line := range logLines {
 		logsCh <- line
 	}
@@ -265,7 +266,7 @@ type mockInstance struct {
 	runtime  *mockRuntime
 	name     string
 	ready    chan struct{}
-	logs     chan string
+	logs     chan runtime.LogEntry
 	waitErr  error
 	stopErr  error
 	stopOnce sync.Once
@@ -298,6 +299,6 @@ func (i *mockInstance) Stop(ctx stdcontext.Context) error {
 	return err
 }
 
-func (i *mockInstance) Logs() <-chan string {
+func (i *mockInstance) Logs() <-chan runtime.LogEntry {
 	return i.logs
 }

@@ -56,7 +56,7 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 	inst := &processInstance{
 		name:    name,
 		cmd:     cmd,
-		logs:    make(chan string, 64),
+		logs:    make(chan runtime.LogEntry, 64),
 		waitErr: make(chan error, 1),
 		health:  svc.Health.Clone(),
 	}
@@ -77,8 +77,8 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go inst.streamLogs(stdout, &wg)
-	go inst.streamLogs(stderr, &wg)
+	go inst.streamLogs(stdout, runtime.LogSourceStdout, &wg)
+	go inst.streamLogs(stderr, runtime.LogSourceStderr, &wg)
 	go func() {
 		wg.Wait()
 		close(inst.logs)
@@ -95,7 +95,7 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 type processInstance struct {
 	name    string
 	cmd     *exec.Cmd
-	logs    chan string
+	logs    chan runtime.LogEntry
 	waitErr chan error
 	health  *stack.Health
 
@@ -184,16 +184,20 @@ func (p *processInstance) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (p *processInstance) Logs() <-chan string {
+func (p *processInstance) Logs() <-chan runtime.LogEntry {
 	return p.logs
 }
 
-func (p *processInstance) streamLogs(r io.Reader, wg *sync.WaitGroup) {
+func (p *processInstance) streamLogs(r io.Reader, source string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimRight(scanner.Text(), "\n")
-		p.logs <- line
+		entry := runtime.LogEntry{Message: line, Source: source}
+		if source == runtime.LogSourceStderr {
+			entry.Level = "warn"
+		}
+		p.logs <- entry
 	}
 }
 

@@ -30,8 +30,11 @@ const (
 type Event struct {
 	Timestamp time.Time
 	Service   string
+	Replica   int
 	Type      EventType
 	Message   string
+	Level     string
+	Source    string
 	Err       error
 }
 
@@ -222,8 +225,11 @@ func sendEvent(events chan<- Event, service string, t EventType, message string,
 	events <- Event{
 		Timestamp: time.Now(),
 		Service:   service,
+		Replica:   0,
 		Type:      t,
 		Message:   message,
+		Level:     "info",
+		Source:    runtime.LogSourceSystem,
 		Err:       err,
 	}
 }
