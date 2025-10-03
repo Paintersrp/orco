@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/example/orco/internal/cliutil"
 	"github.com/example/orco/internal/engine"
 	"github.com/example/orco/internal/runtime"
 	"github.com/example/orco/internal/runtime/docker"
@@ -54,8 +55,8 @@ type context struct {
 	orchestrator *engine.Orchestrator
 }
 
-func (c *context) loadStack() (*stackDocument, error) {
-	return loadStackFromFile(*c.stackFile)
+func (c *context) loadStack() (*cliutil.StackDocument, error) {
+	return cliutil.LoadStackFromFile(*c.stackFile)
 }
 
 func (c *context) getOrchestrator() *engine.Orchestrator {

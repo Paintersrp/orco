@@ -1,4 +1,4 @@
-package cli
+package cliutil
 
 import (
 	"encoding/json"
@@ -10,7 +10,8 @@ import (
 	"github.com/example/orco/internal/runtime"
 )
 
-type logRecord struct {
+// LogRecord represents a structured log event ready for JSON encoding.
+type LogRecord struct {
 	Timestamp time.Time `json:"ts"`
 	Service   string    `json:"service"`
 	Replica   int       `json:"replica"`
@@ -19,7 +20,8 @@ type logRecord struct {
 	Source    string    `json:"source"`
 }
 
-func newLogRecord(event engine.Event) logRecord {
+// NewLogRecord converts an engine event into a structured log record.
+func NewLogRecord(event engine.Event) LogRecord {
 	level := event.Level
 	if level == "" {
 		level = "info"
@@ -28,7 +30,7 @@ func newLogRecord(event engine.Event) logRecord {
 	if source == "" {
 		source = runtime.LogSourceSystem
 	}
-	return logRecord{
+	return LogRecord{
 		Timestamp: event.Timestamp,
 		Service:   event.Service,
 		Replica:   event.Replica,
@@ -38,11 +40,12 @@ func newLogRecord(event engine.Event) logRecord {
 	}
 }
 
-func encodeLogEvent(enc *json.Encoder, stderr io.Writer, event engine.Event) {
+// EncodeLogEvent encodes a log event to JSON, reporting errors to stderr if needed.
+func EncodeLogEvent(enc *json.Encoder, stderr io.Writer, event engine.Event) {
 	if enc == nil {
 		return
 	}
-	record := newLogRecord(event)
+	record := NewLogRecord(event)
 	if record.Timestamp.IsZero() {
 		record.Timestamp = time.Now()
 	}
