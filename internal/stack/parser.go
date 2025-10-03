@@ -63,6 +63,9 @@ func (s *StackFile) Validate() error {
 		if svc.Runtime == "" {
 			return fmt.Errorf("service %s missing runtime", name)
 		}
+		if svc.Runtime != "docker" && svc.Runtime != "process" {
+			return fmt.Errorf("service %s has unsupported runtime %q", name, svc.Runtime)
+		}
 		if svc.Health != nil {
 			if err := validateHealth(name, svc.Health); err != nil {
 				return err
