@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker/client"
 
 	"github.com/example/orco/internal/probe"
+	"github.com/example/orco/internal/runtime"
 	"github.com/example/orco/internal/stack"
 )
 
@@ -60,13 +61,13 @@ func TestRuntimeStartStopLogs(t *testing.T) {
 		t.Fatal("logs channel is nil")
 	}
 
-	var line string
+	var line runtime.LogEntry
 	select {
 	case line = <-logs:
 	case <-time.After(30 * time.Second):
 		t.Fatal("expected log line")
 	}
-	if line == "" {
+	if line.Message == "" {
 		t.Fatal("expected non-empty log line")
 	}
 

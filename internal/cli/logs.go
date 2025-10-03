@@ -1,30 +1,80 @@
 package cli
 
 import (
+	stdcontext "context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/example/orco/internal/engine"
 )
 
 func newLogsCmd(ctx *context) *cobra.Command {
 	var follow bool
 	cmd := &cobra.Command{
 		Use:   "logs [service]",
-		Short: "Tail structured logs (planned)",
+		Short: "Tail structured logs",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			doc, err := ctx.loadStack()
 			if err != nil {
 				return err
 			}
-			target := "all services"
+			var filter string
 			if len(args) == 1 {
-				target = args[0]
-				if _, ok := doc.File.Services[target]; !ok {
-					return fmt.Errorf("unknown service %s", target)
+				filter = args[0]
+				if _, ok := doc.File.Services[filter]; !ok {
+					return fmt.Errorf("unknown service %s", filter)
 				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Log streaming for %s is not yet implemented. Planned follow=%t\n", target, follow)
+
+			events := make(chan engine.Event, 256)
+			var printer sync.WaitGroup
+			printer.Add(1)
+
+			encoder := json.NewEncoder(cmd.OutOrStdout())
+			go func() {
+				defer printer.Done()
+				for event := range events {
+					if event.Type != engine.EventTypeLog {
+						continue
+					}
+					if filter != "" && event.Service != filter {
+						continue
+					}
+					encodeLogEvent(encoder, cmd.ErrOrStderr(), event)
+				}
+			}()
+
+			orch := ctx.getOrchestrator()
+			deployment, err := orch.Up(cmd.Context(), doc.File, doc.Graph, events)
+			if err != nil {
+				close(events)
+				printer.Wait()
+				return err
+			}
+
+			if follow {
+				<-cmd.Context().Done()
+			}
+
+			stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
+			defer cancel()
+			var stopErr error
+			if deployment != nil {
+				stopErr = deployment.Stop(stopCtx, events)
+			}
+
+			close(events)
+			printer.Wait()
+
+			if stopErr != nil && !errors.Is(stopErr, stdcontext.Canceled) {
+				return stopErr
+			}
 			return nil
 		},
 	}

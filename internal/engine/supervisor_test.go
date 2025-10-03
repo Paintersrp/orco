@@ -254,7 +254,7 @@ type fakeInstance struct {
 	waitCh  chan error
 
 	healthCh chan probe.State
-	logsCh   chan string
+	logsCh   chan runtime.LogEntry
 
 	stopErr  error
 	startErr error
@@ -303,6 +303,6 @@ func (f *fakeInstance) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (f *fakeInstance) Logs() <-chan string {
+func (f *fakeInstance) Logs() <-chan runtime.LogEntry {
 	return f.logsCh
 }

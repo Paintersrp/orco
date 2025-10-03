@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -368,11 +369,89 @@ func (s *supervisor) manageInstance(instance runtime.Instance) (error, bool) {
 	}
 }
 
-func (s *supervisor) streamLogs(logs <-chan string, wg *sync.WaitGroup) {
+func (s *supervisor) streamLogs(logs <-chan runtime.LogEntry, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for line := range logs {
-		sendEvent(s.events, s.name, EventTypeLog, line, nil)
+	var dropped int
+	for entry := range logs {
+		if entry.Message == "" {
+			continue
+		}
+		if dropped > 0 {
+			if !s.emitDropped(dropped, false) {
+				dropped++
+				continue
+			}
+			dropped = 0
+		}
+		evt := s.normalizeLog(entry)
+		if !s.emitLog(evt, false) {
+			dropped++
+		}
 	}
+	if dropped > 0 {
+		s.emitDropped(dropped, true)
+	}
+}
+
+func (s *supervisor) normalizeLog(entry runtime.LogEntry) Event {
+	level := entry.Level
+	source := entry.Source
+	if source == "" {
+		source = runtime.LogSourceStdout
+	}
+	if level == "" {
+		if source == runtime.LogSourceStderr {
+			level = "warn"
+		} else {
+			level = "info"
+		}
+	}
+	ts := entry.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	return Event{
+		Timestamp: ts,
+		Service:   s.name,
+		Replica:   0,
+		Type:      EventTypeLog,
+		Message:   entry.Message,
+		Level:     level,
+		Source:    source,
+	}
+}
+
+func (s *supervisor) emitLog(evt Event, block bool) bool {
+	if s.events == nil {
+		return true
+	}
+	if block {
+		select {
+		case s.events <- evt:
+			return true
+		case <-s.ctx.Done():
+			return false
+		}
+	}
+	select {
+	case s.events <- evt:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *supervisor) emitDropped(count int, block bool) bool {
+	evt := Event{
+		Timestamp: time.Now(),
+		Service:   s.name,
+		Replica:   0,
+		Type:      EventTypeLog,
+		Message:   fmt.Sprintf("dropped=%d", count),
+		Level:     "warn",
+		Source:    runtime.LogSourceSystem,
+	}
+	return s.emitLog(evt, block)
 }
 
 func (s *supervisor) stopInstance(instance runtime.Instance, ctx context.Context) error {

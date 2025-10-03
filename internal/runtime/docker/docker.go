@@ -94,7 +94,7 @@ type dockerInstance struct {
 	containerID string
 	svc         *stack.Service
 
-	logs    chan string
+	logs    chan runtime.LogEntry
 	logCtx  context.Context
 	logStop context.CancelFunc
 	logOnce sync.Once
@@ -129,7 +129,7 @@ func newDockerInstance(cli *client.Client, id string, svc *stack.Service) *docke
 		cli:          cli,
 		containerID:  id,
 		svc:          svc,
-		logs:         make(chan string, 128),
+		logs:         make(chan runtime.LogEntry, 128),
 		logCtx:       logCtx,
 		logStop:      logCancel,
 		logDone:      make(chan struct{}),
@@ -158,8 +158,8 @@ func (i *dockerInstance) startLogStreamer() {
 			}
 			defer reader.Close()
 
-			stdout := newLogWriter(i.logCtx, i.logs)
-			stderr := newLogWriter(i.logCtx, i.logs)
+			stdout := newLogWriter(i.logCtx, i.logs, runtime.LogSourceStdout, "")
+			stderr := newLogWriter(i.logCtx, i.logs, runtime.LogSourceStderr, "warn")
 			_, _ = stdcopy.StdCopy(stdout, stderr, reader)
 			stdout.Close()
 			stderr.Close()
@@ -289,7 +289,7 @@ func (i *dockerInstance) shutdownStreams() {
 	<-i.healthDone
 }
 
-func (i *dockerInstance) Logs() <-chan string {
+func (i *dockerInstance) Logs() <-chan runtime.LogEntry {
 	return i.logs
 }
 
@@ -307,14 +307,16 @@ func waitOutcomeError(outcome waitOutcome) error {
 }
 
 type logWriter struct {
-	ctx context.Context
-	ch  chan<- string
-	buf bytes.Buffer
-	mu  sync.Mutex
+	ctx    context.Context
+	ch     chan<- runtime.LogEntry
+	source string
+	level  string
+	buf    bytes.Buffer
+	mu     sync.Mutex
 }
 
-func newLogWriter(ctx context.Context, ch chan<- string) *logWriter {
-	return &logWriter{ctx: ctx, ch: ch}
+func newLogWriter(ctx context.Context, ch chan<- runtime.LogEntry, source, level string) *logWriter {
+	return &logWriter{ctx: ctx, ch: ch, source: source, level: level}
 }
 
 func (w *logWriter) Write(p []byte) (int, error) {
@@ -348,7 +350,7 @@ func (w *logWriter) emit(line string) {
 		return
 	}
 	select {
-	case w.ch <- line:
+	case w.ch <- runtime.LogEntry{Message: line, Source: w.source, Level: w.level}:
 	case <-w.ctx.Done():
 	}
 }
