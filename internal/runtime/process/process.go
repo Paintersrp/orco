@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/runtime"
 	"github.com/example/orco/internal/stack"
 )
@@ -56,6 +57,7 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 		cmd:     cmd,
 		logs:    make(chan string, 64),
 		waitErr: make(chan error, 1),
+		health:  svc.Health.Clone(),
 	}
 
 	var wg sync.WaitGroup
@@ -80,22 +82,59 @@ type processInstance struct {
 	cmd     *exec.Cmd
 	logs    chan string
 	waitErr chan error
+	health  *stack.Health
 }
 
 func (p *processInstance) WaitReady(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err, ok := <-p.waitErr:
-		if ok && err != nil {
-			return fmt.Errorf("process %s exited: %w", p.name, err)
+	if p.health == nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err, ok := <-p.waitErr:
+			if ok && err != nil {
+				return fmt.Errorf("process %s exited: %w", p.name, err)
+			}
+			if !ok {
+				return errors.New("process wait channel closed unexpectedly")
+			}
+			return nil
+		default:
+			return nil
 		}
-		if !ok {
-			return errors.New("process wait channel closed unexpectedly")
+	}
+
+	runner := probe.NewRunner(p.health)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- runner.Run(runCtx)
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			cancel()
+			if err := <-resultCh; err != nil && !errors.Is(err, context.Canceled) {
+				// Swallow probe errors when the caller cancelled.
+			}
+			return ctx.Err()
+		case err := <-resultCh:
+			return err
+		case err, ok := <-p.waitErr:
+			cancel()
+			if probeErr := <-resultCh; probeErr != nil && !errors.Is(probeErr, context.Canceled) {
+				// Prefer process exit details below.
+			}
+			if !ok {
+				return errors.New("process wait channel closed unexpectedly")
+			}
+			if err != nil {
+				return fmt.Errorf("process %s exited: %w", p.name, err)
+			}
+			return nil
 		}
-		return nil
-	case <-time.After(100 * time.Millisecond):
-		return nil
 	}
 }
 
