@@ -74,7 +74,7 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 		return depErr
 	}
 
-	ctx.setDeployment(deployment)
+	ctx.setDeployment(deployment, doc.File.Stack.Name)
 
 	select {
 	case <-cmd.Context().Done():
@@ -128,7 +128,7 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 		return depErr
 	}
 
-	ctx.setDeployment(deployment)
+	ctx.setDeployment(deployment, doc.File.Stack.Name)
 
 	fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
 

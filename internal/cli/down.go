@@ -21,6 +21,20 @@ func newDownCmd(ctx *context) *cobra.Command {
 				return err
 			}
 
+			deployment, stackName := ctx.currentDeploymentInfo()
+			if doc != nil && doc.File != nil && doc.File.Stack.Name != "" {
+				stackName = doc.File.Stack.Name
+			}
+
+			if deployment == nil {
+				if stackName != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "Stack %s has no running services.\n", stackName)
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "No running services found.")
+				}
+				return nil
+			}
+
 			events := make(chan engine.Event, 64)
 			var printer sync.WaitGroup
 			printer.Add(1)
@@ -33,17 +47,6 @@ func newDownCmd(ctx *context) *cobra.Command {
 				printer.Wait()
 			}()
 
-			orch := ctx.getOrchestrator()
-
-			deployment, err := orch.Up(cmd.Context(), doc.File, doc.Graph, events)
-			if err != nil {
-				return err
-			}
-			if deployment == nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "Stack %s has no services to stop.\n", doc.File.Stack.Name)
-				return nil
-			}
-
 			stopCtx, cancel := stdcontext.WithTimeout(stdcontext.WithoutCancel(cmd.Context()), 10*time.Second)
 			defer cancel()
 
@@ -52,7 +55,13 @@ func newDownCmd(ctx *context) *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Stack %s shut down.\n", doc.File.Stack.Name)
+			ctx.clearDeployment(deployment)
+
+			if stackName != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Stack %s shut down.\n", stackName)
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "Stack shut down.")
+			}
 			return nil
 		},
 	}

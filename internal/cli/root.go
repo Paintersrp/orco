@@ -66,9 +66,10 @@ type context struct {
 	stackFile    *string
 	orchestrator *engine.Orchestrator
 
-	mu         sync.RWMutex
-	deployment *engine.Deployment
-	tracker    *statusTracker
+	mu                  sync.RWMutex
+	deployment          *engine.Deployment
+	deploymentStackName string
+	tracker             *statusTracker
 }
 
 func (c *context) loadStack() (*cliutil.StackDocument, error) {
@@ -85,10 +86,11 @@ func (c *context) getOrchestrator() *engine.Orchestrator {
 	return c.orchestrator
 }
 
-func (c *context) setDeployment(dep *engine.Deployment) {
+func (c *context) setDeployment(dep *engine.Deployment, stackName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.deployment = dep
+	c.deploymentStackName = stackName
 }
 
 func (c *context) clearDeployment(dep *engine.Deployment) {
@@ -96,6 +98,7 @@ func (c *context) clearDeployment(dep *engine.Deployment) {
 	defer c.mu.Unlock()
 	if c.deployment == dep {
 		c.deployment = nil
+		c.deploymentStackName = ""
 	}
 }
 
@@ -103,6 +106,12 @@ func (c *context) currentDeployment() *engine.Deployment {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.deployment
+}
+
+func (c *context) currentDeploymentInfo() (*engine.Deployment, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.deployment, c.deploymentStackName
 }
 
 func (c *context) statusTracker() *statusTracker {
