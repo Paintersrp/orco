@@ -12,6 +12,7 @@ import (
 
 	"github.com/Paintersrp/orco/internal/cliutil"
 	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/logmux"
 )
 
 func newLogsCmd(ctx *context) *cobra.Command {
@@ -33,14 +34,18 @@ func newLogsCmd(ctx *context) *cobra.Command {
 				}
 			}
 
-			events := make(chan engine.Event, 256)
+			const logBufferSize = 256
+			events := make(chan engine.Event, logBufferSize)
+			mux := logmux.New(logBufferSize)
+			mux.Add(events)
+
 			var printer sync.WaitGroup
 			printer.Add(1)
 
 			encoder := json.NewEncoder(cmd.OutOrStdout())
 			go func() {
 				defer printer.Done()
-				for event := range events {
+				for event := range mux.Output() {
 					if event.Type != engine.EventTypeLog {
 						continue
 					}
@@ -55,6 +60,7 @@ func newLogsCmd(ctx *context) *cobra.Command {
 			deployment, err := orch.Up(cmd.Context(), doc.File, doc.Graph, events)
 			if err != nil {
 				close(events)
+				mux.Close()
 				printer.Wait()
 				return err
 			}
@@ -71,6 +77,7 @@ func newLogsCmd(ctx *context) *cobra.Command {
 			}
 
 			close(events)
+			mux.Close()
 			printer.Wait()
 
 			if stopErr != nil && !errors.Is(stopErr, stdcontext.Canceled) {
