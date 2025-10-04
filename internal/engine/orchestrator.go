@@ -137,6 +137,15 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			}
 			if err != nil {
 				blockErr := fmt.Errorf("service %s blocked waiting for %s (%s): %w", name, dep.Target, require, err)
+				sendEvent(
+					events,
+					name,
+					EventTypeBlocked,
+					fmt.Sprintf("blocked waiting for %s (%s)", dep.Target, require),
+					0,
+					fmt.Sprintf("%s: %v", ReasonDependencyBlocked, blockErr),
+					blockErr,
+				)
 				if cleanupErr := cleanupDeployment(deployment, events); cleanupErr != nil {
 					blockErr = fmt.Errorf("%w (cleanup failed: %v)", blockErr, cleanupErr)
 				}

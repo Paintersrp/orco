@@ -20,6 +20,7 @@ const (
 	EventTypeUnready  EventType = "unready"
 	EventTypeCrashed  EventType = "crashed"
 	EventTypeFailed   EventType = "failed"
+	EventTypeBlocked  EventType = "blocked"
 )
 
 // Event represents a single lifecycle or log notification.
@@ -37,17 +38,18 @@ type Event struct {
 }
 
 const (
-	ReasonInitialStart   = "initial_start"
-	ReasonRestart        = "restart"
-	ReasonStartFailure   = "start_failure"
-	ReasonInstanceCrash  = "instance_crash"
-	ReasonRetriesExhaust = "retries_exhausted"
-	ReasonLogStreamError = "log_stream_error"
-	ReasonProbeReady     = "probe_ready"
-	ReasonProbeUnready   = "probe_unready"
-	ReasonSupervisorStop = "supervisor_stop"
-	ReasonStopFailed     = "stop_failed"
-	ReasonShutdown       = "shutdown"
+	ReasonInitialStart      = "initial_start"
+	ReasonRestart           = "restart"
+	ReasonStartFailure      = "start_failure"
+	ReasonInstanceCrash     = "instance_crash"
+	ReasonRetriesExhaust    = "retries_exhausted"
+	ReasonLogStreamError    = "log_stream_error"
+	ReasonProbeReady        = "probe_ready"
+	ReasonProbeUnready      = "probe_unready"
+	ReasonSupervisorStop    = "supervisor_stop"
+	ReasonStopFailed        = "stop_failed"
+	ReasonShutdown          = "shutdown"
+	ReasonDependencyBlocked = "dependency_blocked"
 )
 
 func sendEvent(events chan<- Event, service string, t EventType, message string, attempt int, reason string, err error) {
