@@ -331,10 +331,11 @@ func (i *dockerInstance) performStop(ctx context.Context, force bool) error {
 				i.stopErr = fmt.Errorf("container kill: %w", err)
 				return
 			}
-			i.stopErr = nil
 			select {
 			case <-i.waitDone:
+				i.stopErr = waitOutcomeExitError(i.waitResult)
 			case <-ctx.Done():
+				i.stopErr = ctx.Err()
 			}
 			return
 		}
@@ -355,10 +356,11 @@ func (i *dockerInstance) performStop(ctx context.Context, force bool) error {
 			i.stopErr = err
 			return
 		}
-		i.stopErr = nil
 		select {
 		case <-i.waitDone:
+			i.stopErr = waitOutcomeExitError(i.waitResult)
 		case <-ctx.Done():
+			i.stopErr = ctx.Err()
 		}
 	})
 	return i.stopErr
