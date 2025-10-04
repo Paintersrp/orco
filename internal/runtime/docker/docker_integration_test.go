@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,6 +228,14 @@ func TestRuntimeContainerExitSurfaced(t *testing.T) {
 
 	if err := inst.WaitReady(ctx); err == nil {
 		t.Fatal("expected wait ready error")
+	}
+
+	waitErr := inst.Wait(ctx)
+	if waitErr == nil {
+		t.Fatal("expected wait error")
+	}
+	if !strings.Contains(waitErr.Error(), "status 2") {
+		t.Fatalf("expected wait error to contain exit status, got %v", waitErr)
 	}
 }
 
