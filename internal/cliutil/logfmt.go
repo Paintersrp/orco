@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Paintersrp/orco/internal/engine"
@@ -24,7 +26,11 @@ type LogRecord struct {
 func NewLogRecord(event engine.Event) LogRecord {
 	level := event.Level
 	if level == "" {
-		level = "info"
+		if inferred := inferLogLevel(event.Message); inferred != "" {
+			level = inferred
+		} else {
+			level = "info"
+		}
 	}
 	source := event.Source
 	if source == "" {
@@ -37,6 +43,25 @@ func NewLogRecord(event engine.Event) LogRecord {
 		Level:     level,
 		Message:   event.Message,
 		Source:    source,
+	}
+}
+
+var levelTokenPattern = regexp.MustCompile(`(?i)\b(error|warn|info)\b`)
+
+func inferLogLevel(message string) string {
+	matches := levelTokenPattern.FindStringSubmatch(message)
+	if len(matches) < 2 {
+		return ""
+	}
+	switch strings.ToLower(matches[1]) {
+	case "error":
+		return "error"
+	case "warn":
+		return "warn"
+	case "info":
+		return "info"
+	default:
+		return ""
 	}
 }
 
