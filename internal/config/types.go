@@ -177,10 +177,11 @@ func (s *Stack) Validate() error {
 				return fmt.Errorf("%s: must contain at least one entry", serviceField(name, "command"))
 			}
 		}
-		if svc.Health != nil {
-			if err := validateProbe(name, svc.Health); err != nil {
-				return err
-			}
+		if svc.Health == nil {
+			return fmt.Errorf("%s: is required", serviceField(name, "health"))
+		}
+		if err := validateProbe(name, svc.Health); err != nil {
+			return err
 		}
 		if svc.Replicas < 1 {
 			return fmt.Errorf("%s: must be at least 1", serviceField(name, "replicas"))

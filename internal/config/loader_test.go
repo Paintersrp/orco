@@ -292,6 +292,30 @@ services:
 	}
 }
 
+func TestLoadServiceMissingHealthFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "services.api.health") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadMalformedPort(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")
