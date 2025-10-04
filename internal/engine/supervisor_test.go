@@ -122,11 +122,12 @@ func TestSupervisorBackoffJitter(t *testing.T) {
 
 	rt := &fakeRuntime{instances: []*fakeInstance{fail, fail2, fail3, fail4}}
 
+	delayCh := make(chan time.Duration, 8)
 	var delays []time.Duration
 	sup := newSupervisor("db", svc, rt, make(chan Event, 32))
 	sup.jitter = func(d time.Duration) time.Duration { return d }
 	sup.sleep = func(ctx context.Context, d time.Duration) error {
-		delays = append(delays, d)
+		delayCh <- d
 		return nil
 	}
 
@@ -136,13 +137,22 @@ func TestSupervisorBackoffJitter(t *testing.T) {
 		t.Fatalf("expected readiness failure")
 	}
 
-	sup.Stop(context.Background())
-
 	expected := []time.Duration{
 		50 * time.Millisecond,
 		100 * time.Millisecond,
 		200 * time.Millisecond,
 	}
+
+	for len(delays) < len(expected) {
+		select {
+		case d := <-delayCh:
+			delays = append(delays, d)
+		case <-time.After(time.Second):
+			t.Fatalf("expected %d backoff delays, got %d (%v)", len(expected), len(delays), delays)
+		}
+	}
+
+	sup.Stop(context.Background())
 
 	if len(delays) != len(expected) {
 		t.Fatalf("expected %d backoff delays, got %d (%v)", len(expected), len(delays), delays)
@@ -198,6 +208,75 @@ func TestSupervisorMaxRetriesEmitsCrashed(t *testing.T) {
 
 	if !found {
 		t.Fatalf("expected crashed event after exhausting retries")
+	}
+}
+
+func TestSupervisorCancelDuringBackoffDeliversCancellation(t *testing.T) {
+	svc := &stack.Service{
+		RestartPolicy: &stack.RestartPolicy{
+			MaxRetries: 3,
+			Backoff: &stack.Backoff{
+				Min:    stack.Duration{Duration: 10 * time.Millisecond},
+				Max:    stack.Duration{Duration: 20 * time.Millisecond},
+				Factor: 2,
+			},
+		},
+	}
+
+	readyErr := errors.New("not ready")
+	inst := &fakeInstance{waitCh: make(chan error, 1)}
+	inst.waitCh <- readyErr
+	rt := &fakeRuntime{
+		instances: []*fakeInstance{inst},
+		startCh:   make(chan struct{}, 1),
+	}
+
+	sup := newSupervisor("api", svc, rt, nil)
+	sup.jitter = func(d time.Duration) time.Duration { return d }
+
+	sleepCalled := make(chan struct{})
+	var once sync.Once
+	sup.sleep = func(ctx context.Context, d time.Duration) error {
+		once.Do(func() { close(sleepCalled) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+			return nil
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sup.Start(ctx)
+
+	waitForStart(t, rt.startCh)
+
+	readyErrCh := make(chan error, 1)
+	go func() {
+		readyErrCh <- sup.AwaitReady(context.Background())
+	}()
+
+	select {
+	case <-sleepCalled:
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for backoff sleep")
+	}
+
+	cancel()
+
+	select {
+	case err := <-readyErrCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context canceled, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("await ready did not return after cancellation")
+	}
+
+	if err := sup.Stop(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("stop supervisor: %v", err)
 	}
 }
 

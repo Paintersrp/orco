@@ -255,6 +255,8 @@ func (s *supervisor) run() {
 
 		restarts++
 		if err := s.sleepBackoff(&backoffBase); err != nil {
+			s.deliverStarted(err)
+			s.deliverInitial(err)
 			s.setRunErr(err)
 			return
 		}
