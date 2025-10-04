@@ -205,77 +205,152 @@ func TestOrchestratorBlocksOnReadyRequirement(t *testing.T) {
 }
 
 func TestOrchestratorDependencyFailureBlocksDependents(t *testing.T) {
-	failure := errors.New("db never became ready")
-	dbInstance := &fakeInstance{waitErr: failure}
-	apiInstance := &fakeInstance{waitCh: make(chan error, 1)}
+	t.Parallel()
 
-	rt := newRecordingRuntime(map[string]*fakeInstance{
-		"db":  dbInstance,
-		"api": apiInstance,
-	})
-
-	doc := &stack.StackFile{
-		Services: map[string]*stack.Service{
-			"db": {
-				Runtime: "test",
+	cases := map[string]struct {
+		configureDependency func(dep *stack.Dependency)
+		configureInstance   func(db *fakeInstance)
+		wantReasonContains  string
+	}{
+		"readiness failure": {
+			configureDependency: func(dep *stack.Dependency) {},
+			configureInstance: func(db *fakeInstance) {
+				db.waitErr = errors.New("db never became ready")
 			},
-			"api": {
-				Runtime: "test",
-				DependsOn: []stack.Dependency{{
-					Target:  "db",
-					Require: "ready",
-				}},
+			wantReasonContains: "db never became ready",
+		},
+		"dependency timeout": {
+			configureDependency: func(dep *stack.Dependency) {
+				dep.Timeout.Duration = 50 * time.Millisecond
 			},
+			configureInstance: func(db *fakeInstance) {
+				db.waitCh = make(chan error)
+			},
+			wantReasonContains: context.DeadlineExceeded.Error(),
 		},
 	}
 
-	graph, err := BuildGraph(doc)
-	if err != nil {
-		t.Fatalf("build graph: %v", err)
-	}
-	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+	for name, tc := range cases {
+		name := name
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	events := make(chan Event, 32)
-	drainDone := make(chan struct{})
-	go func() {
-		defer close(drainDone)
-		for range events {
-		}
-	}()
-	defer func() {
-		close(events)
-		<-drainDone
-	}()
+			dbInstance := &fakeInstance{}
+			tc.configureInstance(dbInstance)
+			apiInstance := &fakeInstance{waitCh: make(chan error, 1)}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+			rt := newRecordingRuntime(map[string]*fakeInstance{
+				"db":  dbInstance,
+				"api": apiInstance,
+			})
 
-	deployment, err := orch.Up(ctx, doc, graph, events)
-	if err == nil {
-		t.Fatalf("expected orchestrator up to fail")
-	}
-	if deployment != nil {
-		t.Fatalf("expected nil deployment on failure")
-	}
-
-	if name := waitForServiceStart(t, rt.startCh); name != "db" {
-		t.Fatalf("expected db to start first, got %s", name)
-	}
-	drainDeadline := time.After(100 * time.Millisecond)
-	for {
-		select {
-		case name := <-rt.startCh:
-			if name == "api" {
-				t.Fatalf("api should not have started when dependency failed")
+			dep := stack.Dependency{
+				Target:  "db",
+				Require: "ready",
 			}
-		case <-drainDeadline:
-			goto verify
-		}
-	}
+			tc.configureDependency(&dep)
 
-verify:
-	if got := err.Error(); !strings.Contains(got, "service api blocked waiting for db (ready)") {
-		t.Fatalf("unexpected error message: %v", got)
+			doc := &stack.StackFile{
+				Services: map[string]*stack.Service{
+					"db": {
+						Runtime: "test",
+					},
+					"api": {
+						Runtime:   "test",
+						DependsOn: []stack.Dependency{dep},
+					},
+				},
+			}
+
+			graph, err := BuildGraph(doc)
+			if err != nil {
+				t.Fatalf("build graph: %v", err)
+			}
+			orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+			events := make(chan Event, 32)
+			drainDone := make(chan struct{})
+			var (
+				mu       sync.Mutex
+				recorded []Event
+			)
+			go func() {
+				defer close(drainDone)
+				for evt := range events {
+					mu.Lock()
+					recorded = append(recorded, evt)
+					mu.Unlock()
+				}
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			deployment, err := orch.Up(ctx, doc, graph, events)
+			if err == nil {
+				t.Fatalf("expected orchestrator up to fail")
+			}
+			if deployment != nil {
+				t.Fatalf("expected nil deployment on failure")
+			}
+
+			if name := waitForServiceStart(t, rt.startCh); name != "db" {
+				t.Fatalf("expected db to start first, got %s", name)
+			}
+			drainDeadline := time.After(100 * time.Millisecond)
+			for {
+				select {
+				case name := <-rt.startCh:
+					if name == "api" {
+						t.Fatalf("api should not have started when dependency failed")
+					}
+				case <-drainDeadline:
+					goto verify
+				}
+			}
+
+		verify:
+			if got := err.Error(); !strings.Contains(got, "service api blocked waiting for db (ready)") {
+				t.Fatalf("unexpected error message: %v", got)
+			}
+
+			close(events)
+			<-drainDone
+
+			mu.Lock()
+			recordedCopy := append([]Event(nil), recorded...)
+			mu.Unlock()
+
+			var blocked *Event
+			for i := range recordedCopy {
+				evt := recordedCopy[i]
+				if evt.Service == "api" && evt.Type == EventTypeBlocked {
+					blocked = &evt
+					break
+				}
+			}
+
+			if blocked == nil {
+				t.Fatalf("missing blocked event for api service; got %+v", recordedCopy)
+			}
+
+			if !strings.Contains(blocked.Message, "blocked waiting for db (ready)") {
+				t.Fatalf("unexpected blocked message: %+v", blocked)
+			}
+
+			if blocked.Err == nil {
+				t.Fatalf("blocked event missing error: %+v", blocked)
+			}
+
+			if !strings.Contains(blocked.Reason, tc.wantReasonContains) {
+				t.Fatalf("blocked reason %q missing %q", blocked.Reason, tc.wantReasonContains)
+			}
+
+			if !strings.Contains(blocked.Err.Error(), tc.wantReasonContains) {
+				t.Fatalf("blocked error %q missing %q", blocked.Err.Error(), tc.wantReasonContains)
+			}
+		})
 	}
 }
 
