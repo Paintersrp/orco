@@ -22,11 +22,8 @@ func (p *processInstance) Stop(ctx context.Context) error {
 	}
 
 	select {
-	case err, ok := <-p.waitErr:
-		if ok {
-			return err
-		}
-		return nil
+	case <-p.waitDone:
+		return p.exitError()
 	case <-time.After(2 * time.Second):
 	case <-ctx.Done():
 		return ctx.Err()
@@ -35,8 +32,10 @@ func (p *processInstance) Stop(ctx context.Context) error {
 	if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("kill process group %s: %w", p.name, err)
 	}
-	if err, ok := <-p.waitErr; ok {
-		return err
+	select {
+	case <-p.waitDone:
+		return p.exitError()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }

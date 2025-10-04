@@ -15,6 +15,12 @@ type Instance interface {
 	// provided context is cancelled.
 	WaitReady(ctx context.Context) error
 
+	// Wait blocks until the instance exits or the provided context is
+	// cancelled. Implementations should return any error associated with
+	// the termination of the underlying process/container. A nil error
+	// indicates a clean shutdown.
+	Wait(ctx context.Context) error
+
 	// Health returns a channel that delivers readiness transitions for the
 	// instance. A nil channel indicates that the runtime does not surface
 	// health information beyond the initial readiness gate.

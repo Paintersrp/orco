@@ -300,6 +300,15 @@ func (i *blockingInstance) WaitReady(ctx stdcontext.Context) error {
 	}
 }
 
+func (i *blockingInstance) Wait(ctx stdcontext.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-i.runtime.stopRelease:
+		return nil
+	}
+}
+
 func (i *blockingInstance) Health() <-chan probe.State {
 	return nil
 }
@@ -445,6 +454,16 @@ func (i *mockInstance) WaitReady(ctx stdcontext.Context) error {
 		}
 		i.runtime.recordReady(i.name)
 		return nil
+	}
+}
+
+func (i *mockInstance) Wait(ctx stdcontext.Context) error {
+	if i.waitErr != nil {
+		return i.waitErr
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

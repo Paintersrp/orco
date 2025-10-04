@@ -202,8 +202,7 @@ func TestStartPreservesBaseEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start service: %v", err)
 	}
-	procInst, ok := inst.(*processInstance)
-	if !ok {
+	if _, ok := inst.(*processInstance); !ok {
 		t.Fatalf("expected *processInstance, got %T", inst)
 	}
 
@@ -224,13 +223,13 @@ func TestStartPreservesBaseEnvironment(t *testing.T) {
 		t.Fatalf("timed out waiting for log output")
 	}
 
-	select {
-	case err := <-procInst.waitErr:
-		if err != nil {
-			t.Fatalf("process exited with error: %v", err)
+	{
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		waitErr := inst.Wait(waitCtx)
+		waitCancel()
+		if waitErr != nil {
+			t.Fatalf("process exited with error: %v", waitErr)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for process exit")
 	}
 }
 
@@ -256,18 +255,17 @@ func TestStartSetsWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start service: %v", err)
 	}
-	procInst, ok := inst.(*processInstance)
-	if !ok {
+	if _, ok := inst.(*processInstance); !ok {
 		t.Fatalf("expected *processInstance, got %T", inst)
 	}
 
-	select {
-	case err := <-procInst.waitErr:
-		if err != nil {
-			t.Fatalf("process exited with error: %v", err)
+	{
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		waitErr := inst.Wait(waitCtx)
+		waitCancel()
+		if waitErr != nil {
+			t.Fatalf("process exited with error: %v", waitErr)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for process exit")
 	}
 
 	data, err := os.ReadFile(outputPath)

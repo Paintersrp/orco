@@ -60,11 +60,12 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 	}
 
 	inst := &processInstance{
-		name:    name,
-		cmd:     cmd,
-		logs:    make(chan runtime.LogEntry, 64),
-		waitErr: make(chan error, 1),
-		health:  svc.Health.Clone(),
+		name:     name,
+		cmd:      cmd,
+		logs:     make(chan runtime.LogEntry, 64),
+		waitErr:  make(chan error, 1),
+		waitDone: make(chan struct{}),
+		health:   svc.Health.Clone(),
 	}
 
 	if inst.health != nil {
@@ -97,16 +98,20 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 		inst.waitErr <- cmd.Wait()
 		close(inst.waitErr)
 	}()
+	go inst.observeExit()
 
 	return inst, nil
 }
 
 type processInstance struct {
-	name    string
-	cmd     *exec.Cmd
-	logs    chan runtime.LogEntry
-	waitErr chan error
-	health  *stack.Health
+	name     string
+	cmd      *exec.Cmd
+	logs     chan runtime.LogEntry
+	waitErr  chan error
+	waitDone chan struct{}
+	waitOnce sync.Once
+	waitRes  error
+	health   *stack.Health
 
 	watchCtx    context.Context
 	watchCancel context.CancelFunc
@@ -125,14 +130,8 @@ func (p *processInstance) WaitReady(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case err, ok := <-p.waitErr:
-			if ok && err != nil {
-				return fmt.Errorf("process %s exited: %w", p.name, err)
-			}
-			if !ok {
-				return errors.New("process wait channel closed unexpectedly")
-			}
-			return nil
+		case <-p.waitDone:
+			return p.wrapExitError()
 		default:
 			return nil
 		}
@@ -149,15 +148,18 @@ func (p *processInstance) WaitReady(ctx context.Context) error {
 			return err
 		case <-p.readyCh:
 			return nil
-		case err, ok := <-p.waitErr:
-			if !ok {
-				return errors.New("process wait channel closed unexpectedly")
-			}
-			if err != nil {
-				return fmt.Errorf("process %s exited: %w", p.name, err)
-			}
-			return nil
+		case <-p.waitDone:
+			return p.wrapExitError()
 		}
+	}
+}
+
+func (p *processInstance) Wait(ctx context.Context) error {
+	select {
+	case <-p.waitDone:
+		return p.wrapExitError()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -225,4 +227,32 @@ func (p *processInstance) cancelWatch() {
 		p.watchCancel()
 		p.watchCancel = nil
 	}
+}
+
+func (p *processInstance) wrapExitError() error {
+	err := p.exitError()
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("process %s exited: %w", p.name, err)
+}
+
+func (p *processInstance) exitError() error {
+	return p.waitRes
+}
+
+func (p *processInstance) recordExit(err error) {
+	p.waitOnce.Do(func() {
+		p.waitRes = err
+		close(p.waitDone)
+	})
+}
+
+func (p *processInstance) observeExit() {
+	err, ok := <-p.waitErr
+	if !ok {
+		p.recordExit(errors.New("process wait channel closed unexpectedly"))
+		return
+	}
+	p.recordExit(err)
 }
