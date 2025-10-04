@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/orco/internal/engine"
-	runtimelib "github.com/example/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/engine"
+	runtimelib "github.com/Paintersrp/orco/internal/runtime"
 )
 
 func TestLogsCommandStreamsStructuredOutput(t *testing.T) {

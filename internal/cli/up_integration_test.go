@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/orco/internal/engine"
-	"github.com/example/orco/internal/probe"
-	"github.com/example/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/probe"
+	"github.com/Paintersrp/orco/internal/runtime"
 )
 
 func TestUpCommandStartsServicesInDependencyOrder(t *testing.T) {

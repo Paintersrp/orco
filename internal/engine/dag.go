@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 // Graph represents service dependencies.

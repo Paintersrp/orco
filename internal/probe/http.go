@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 type httpProber struct {

@@ -12,9 +12,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/example/orco/internal/cliutil"
-	"github.com/example/orco/internal/engine"
-	"github.com/example/orco/internal/tui"
+	"github.com/Paintersrp/orco/internal/cliutil"
+	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/tui"
 )
 
 func newUpCmd(ctx *context) *cobra.Command {

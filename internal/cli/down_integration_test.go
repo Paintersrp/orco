@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/example/orco/internal/engine"
-	"github.com/example/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/runtime"
 )
 
 func TestDownCommandStopsServicesInReverseOrder(t *testing.T) {

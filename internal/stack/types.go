@@ -1,6 +1,6 @@
 package stack
 
-import "github.com/example/orco/internal/config"
+import "github.com/Paintersrp/orco/internal/config"
 
 type (
 	Duration      = config.Duration

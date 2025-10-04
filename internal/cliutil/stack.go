@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/example/orco/internal/config"
-	"github.com/example/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/config"
+	"github.com/Paintersrp/orco/internal/engine"
 )
 
 // StackDocument bundles a parsed stack file with the derived dependency graph.

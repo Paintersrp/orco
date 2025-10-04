@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/orco/internal/engine"
-	runtimelib "github.com/example/orco/internal/runtime"
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/engine"
+	runtimelib "github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 func TestWaitReadyBlocksUntilProbeSuccess(t *testing.T) {

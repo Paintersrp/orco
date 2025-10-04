@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/orco/internal/runtime"
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 // EventType captures high level lifecycle notifications emitted by the

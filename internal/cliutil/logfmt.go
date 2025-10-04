@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/example/orco/internal/engine"
-	"github.com/example/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/runtime"
 )
 
 // LogRecord represents a structured log event ready for JSON encoding.
