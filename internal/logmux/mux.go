@@ -2,6 +2,8 @@ package logmux
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -168,14 +170,20 @@ func normalize(evt engine.Event) engine.Event {
 	if evt.Source == "" {
 		evt.Source = runtime.LogSourceStdout
 	}
-	if evt.Level == "" {
-		if evt.Source == runtime.LogSourceStderr {
-			evt.Level = "warn"
-		} else {
-			evt.Level = "info"
-		}
-	}
+	evt.Level = normalizeLevel(evt.Level, evt.Message)
 	return evt
+}
+
+var levelTokenPattern = regexp.MustCompile(`(?i)\b(ERROR|WARN|INFO)\b`)
+
+func normalizeLevel(current, message string) string {
+	if match := levelTokenPattern.FindStringSubmatch(message); len(match) > 1 {
+		return strings.ToLower(match[1])
+	}
+	if current != "" {
+		return strings.ToLower(current)
+	}
+	return "info"
 }
 
 func synthesizeDropEvent(service string, rec dropRecord) engine.Event {
