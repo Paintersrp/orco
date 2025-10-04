@@ -19,6 +19,10 @@ func TestDownCommandStopsServicesInReverseOrder(t *testing.T) {
 stack:
   name: "demo"
   workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
 services:
   db:
     runtime: process
@@ -69,6 +73,10 @@ func TestDownCommandReportsStopErrors(t *testing.T) {
 stack:
   name: "demo"
   workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
 services:
   db:
     runtime: process

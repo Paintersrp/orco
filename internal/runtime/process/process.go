@@ -68,17 +68,20 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 	}
 
 	if inst.health != nil {
+		prober, err := probe.New(inst.health)
+		if err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, fmt.Errorf("create probe: %w", err)
+		}
+
 		inst.healthCh = make(chan probe.State, 1)
 		inst.readyCh = make(chan struct{})
 		inst.readyErr = make(chan error, 1)
 		inst.watchCtx, inst.watchCancel = context.WithCancel(context.Background())
 
-		stateCh := make(chan probe.State, 1)
-		go func() {
-			defer close(stateCh)
-			probe.NewRunner(inst.health).Watch(inst.watchCtx, stateCh)
-		}()
-		go inst.observeHealth(stateCh)
+		events := probe.Watch(inst.watchCtx, prober, inst.health, nil)
+		go inst.observeHealth(events)
 	}
 
 	var wg sync.WaitGroup

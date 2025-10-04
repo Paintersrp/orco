@@ -22,6 +22,10 @@ func TestLogsCommandStreamsStructuredOutput(t *testing.T) {
 stack:
   name: "demo"
   workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
 services:
   api:
     runtime: process
@@ -46,10 +50,10 @@ services:
 
 	cmdCtx, cancel := stdcontext.WithCancel(stdcontext.Background())
 	cmd.SetContext(cmdCtx)
-        go func() {
-                time.Sleep(150 * time.Millisecond)
-                cancel()
-        }()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("logs command failed: %v\nstderr: %s", err, stderr.String())
