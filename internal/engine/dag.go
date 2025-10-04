@@ -1,11 +1,14 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/Paintersrp/orco/internal/stack"
 )
+
+var errNilStackFile = errors.New("cannot build graph from a nil stack file")
 
 // Graph represents service dependencies.
 type Graph struct {
@@ -17,6 +20,10 @@ type Graph struct {
 
 // BuildGraph constructs the dependency graph and validates acyclicity.
 func BuildGraph(doc *stack.StackFile) (*Graph, error) {
+	if doc == nil {
+		return nil, errNilStackFile
+	}
+
 	g := &Graph{
 		services: make(map[string]*stack.Service, len(doc.Services)),
 		edges:    make(map[string][]string, len(doc.Services)),
