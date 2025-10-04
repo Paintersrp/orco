@@ -11,19 +11,29 @@ import (
 )
 
 func (p *processInstance) Stop(ctx context.Context) error {
+	return p.terminate(ctx, false)
+}
+
+func (p *processInstance) Kill(ctx context.Context) error {
+	return p.terminate(ctx, true)
+}
+
+func (p *processInstance) terminate(ctx context.Context, force bool) error {
 	p.cancelWatch()
 	if p.cmd.Process == nil {
 		return nil
 	}
-	// Attempt a graceful shutdown first.
-	_ = p.cmd.Process.Signal(os.Interrupt)
+	if !force {
+		// Attempt a graceful shutdown first.
+		_ = p.cmd.Process.Signal(os.Interrupt)
 
-	select {
-	case <-p.waitDone:
-		return p.exitError()
-	case <-time.After(2 * time.Second):
-	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-p.waitDone:
+			return p.exitError()
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {

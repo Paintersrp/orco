@@ -8,9 +8,9 @@ import (
 	"github.com/example/orco/internal/stack"
 )
 
-// Instance represents a single running service instance managed by a runtime
+// Handle represents a single running service instance managed by a runtime
 // adapter.
-type Instance interface {
+type Handle interface {
 	// WaitReady blocks until the instance is considered ready or the
 	// provided context is cancelled.
 	WaitReady(ctx context.Context) error
@@ -30,10 +30,16 @@ type Instance interface {
 	// and safe to call multiple times.
 	Stop(ctx context.Context) error
 
+	// Kill forcefully terminates the instance without waiting for graceful
+	// shutdown handlers. Implementations should best-effort deliver a hard
+	// termination signal and return once the underlying process/container
+	// has exited or the provided context is cancelled.
+	Kill(ctx context.Context) error
+
 	// Logs returns a channel of log entries associated with the instance.
 	// The channel should be closed once the instance has stopped. A nil
 	// channel indicates that the runtime does not provide log streaming.
-	Logs() <-chan LogEntry
+	Logs(ctx context.Context) (<-chan LogEntry, error)
 }
 
 // Runtime describes a backend capable of launching services.
@@ -41,7 +47,41 @@ type Runtime interface {
 	// Start launches the provided service and returns a handle to the
 	// running instance. Implementations should respect context cancellation
 	// and surface failures via returned errors.
-	Start(ctx context.Context, name string, svc *stack.Service) (Instance, error)
+	Start(ctx context.Context, spec StartSpec) (Handle, error)
+}
+
+// StartSpec captures the parameters required to launch a service instance via a
+// runtime implementation.
+type StartSpec struct {
+	// Name is a human readable identifier for the instance.
+	Name string
+
+	// Image identifies the container image to launch (Docker runtime).
+	Image string
+
+	// Command describes the process invocation for the instance. The
+	// runtime may interpret this either as an entrypoint override (Docker)
+	// or an executable invocation (process runtime).
+	Command []string
+
+	// Env defines the environment variables that should be injected into
+	// the launched instance.
+	Env map[string]string
+
+	// Ports enumerates the port mappings requested by the caller using the
+	// Docker CLI notation (e.g. "127.0.0.1:8080:80/tcp").
+	Ports []string
+
+	// Workdir configures the working directory for the launched process.
+	Workdir string
+
+	// Health optionally configures readiness probing for the instance.
+	Health *stack.Health
+
+	// Service retains the original stack definition when available. This is
+	// primarily used by existing runtimes that need access to additional
+	// configuration that has not yet been promoted onto StartSpec.
+	Service *stack.Service
 }
 
 // LogEntry represents a single line of log output emitted by an instance.

@@ -292,9 +292,10 @@ func newRecordingRuntime(instances map[string]*fakeInstance) *recordingRuntime {
 	}
 }
 
-func (r *recordingRuntime) Start(ctx context.Context, name string, svc *stack.Service) (runtimelib.Instance, error) {
+func (r *recordingRuntime) Start(ctx context.Context, spec runtimelib.StartSpec) (runtimelib.Handle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	name := spec.Name
 	inst, ok := r.instances[name]
 	if !ok {
 		return nil, fmt.Errorf("no instance configured for service %s", name)

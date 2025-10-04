@@ -47,26 +47,21 @@ func (r *runtimeImpl) getClient() (*client.Client, error) {
 	return r.client, r.clientErr
 }
 
-func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service) (runtime.Instance, error) {
-	if svc == nil {
-		return nil, errors.New("service definition is required")
-	}
-
+func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtime.Handle, error) {
 	cli, err := r.getClient()
 	if err != nil {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}
 
-	service := svc.Clone()
-	if service.Image == "" {
+	if spec.Image == "" {
 		return nil, errors.New("service image is required")
 	}
 
-	if err := ensureImage(ctx, cli, service.Image); err != nil {
+	if err := ensureImage(ctx, cli, spec.Image); err != nil {
 		return nil, err
 	}
 
-	containerCfg, hostCfg, err := buildConfigs(service)
+	containerCfg, hostCfg, err := buildConfigs(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +76,14 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 		return nil, fmt.Errorf("container start: %w", err)
 	}
 
-	inst := newDockerInstance(cli, containerID, service)
+	var health *stack.Health
+	if spec.Health != nil {
+		health = spec.Health.Clone()
+	} else if spec.Service != nil {
+		health = spec.Service.Health.Clone()
+	}
+
+	inst := newDockerInstance(cli, containerID, spec.Name, health)
 	inst.startLogStreamer()
 	inst.startWaiter()
 	inst.startHealthMonitor()
@@ -92,7 +94,8 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 type dockerInstance struct {
 	cli         *client.Client
 	containerID string
-	svc         *stack.Service
+	name        string
+	health      *stack.Health
 
 	logs    chan runtime.LogEntry
 	logCtx  context.Context
@@ -122,13 +125,14 @@ type waitOutcome struct {
 	err    error
 }
 
-func newDockerInstance(cli *client.Client, id string, svc *stack.Service) *dockerInstance {
+func newDockerInstance(cli *client.Client, id string, name string, health *stack.Health) *dockerInstance {
 	logCtx, logCancel := context.WithCancel(context.Background())
 	healthCtx, healthCancel := context.WithCancel(context.Background())
 	return &dockerInstance{
 		cli:          cli,
 		containerID:  id,
-		svc:          svc,
+		name:         name,
+		health:       health,
 		logs:         make(chan runtime.LogEntry, 128),
 		logCtx:       logCtx,
 		logStop:      logCancel,
@@ -198,7 +202,7 @@ func (i *dockerInstance) signalReady(err error) {
 }
 
 func (i *dockerInstance) startHealthMonitor() {
-	if i.svc == nil || i.svc.Health == nil {
+	if i.health == nil {
 		i.signalReady(nil)
 		close(i.healthEvents)
 		close(i.healthDone)
@@ -206,14 +210,14 @@ func (i *dockerInstance) startHealthMonitor() {
 	}
 	go func() {
 		defer close(i.healthDone)
-		prober, err := probe.New(i.svc.Health)
+		prober, err := probe.New(i.health)
 		if err != nil {
 			i.signalReady(err)
 			close(i.healthEvents)
 			return
 		}
 
-		events := probe.Watch(i.healthCtx, prober, i.svc.Health, nil)
+		events := probe.Watch(i.healthCtx, prober, i.health, nil)
 		readyReported := false
 
 		for {
@@ -273,7 +277,7 @@ func (i *dockerInstance) startHealthMonitor() {
 }
 
 func (i *dockerInstance) WaitReady(ctx context.Context) error {
-	if i.svc == nil || i.svc.Health == nil {
+	if i.health == nil {
 		select {
 		case <-i.waitDone:
 			return waitOutcomeError(i.waitResult)
@@ -304,15 +308,37 @@ func (i *dockerInstance) Wait(ctx context.Context) error {
 }
 
 func (i *dockerInstance) Health() <-chan probe.State {
-	if i.svc == nil || i.svc.Health == nil {
+	if i.health == nil {
 		return nil
 	}
 	return i.healthEvents
 }
 
 func (i *dockerInstance) Stop(ctx context.Context) error {
+	return i.performStop(ctx, false)
+}
+
+func (i *dockerInstance) Kill(ctx context.Context) error {
+	return i.performStop(ctx, true)
+}
+
+func (i *dockerInstance) performStop(ctx context.Context, force bool) error {
 	i.stopOnce.Do(func() {
 		defer i.shutdownStreams()
+		if force {
+			err := i.cli.ContainerKill(ctx, i.containerID, "SIGKILL")
+			if err != nil && !client.IsErrNotFound(err) {
+				i.stopErr = fmt.Errorf("container kill: %w", err)
+				return
+			}
+			i.stopErr = nil
+			select {
+			case <-i.waitDone:
+			case <-ctx.Done():
+			}
+			return
+		}
+
 		sec := int((10 * time.Second).Seconds())
 		opts := container.StopOptions{Timeout: &sec}
 		err := i.cli.ContainerStop(ctx, i.containerID, opts)
@@ -349,8 +375,32 @@ func (i *dockerInstance) shutdownStreams() {
 	<-i.healthDone
 }
 
-func (i *dockerInstance) Logs() <-chan runtime.LogEntry {
-	return i.logs
+func (i *dockerInstance) Logs(ctx context.Context) (<-chan runtime.LogEntry, error) {
+	if ctx == nil {
+		return i.logs, nil
+	}
+
+	out := make(chan runtime.LogEntry, cap(i.logs))
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case entry, ok := <-i.logs:
+				if !ok {
+					return
+				}
+				select {
+				case out <- entry:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	return out, nil
 }
 
 func waitOutcomeError(outcome waitOutcome) error {
@@ -455,19 +505,19 @@ func ensureImage(ctx context.Context, cli *client.Client, imageName string) erro
 	return nil
 }
 
-func buildConfigs(svc *stack.Service) (*container.Config, *container.HostConfig, error) {
-	env := make([]string, 0, len(svc.Env))
-	for k, v := range svc.Env {
+func buildConfigs(spec runtime.StartSpec) (*container.Config, *container.HostConfig, error) {
+	env := make([]string, 0, len(spec.Env))
+	for k, v := range spec.Env {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 	sort.Strings(env)
 
 	exposed := nat.PortSet{}
 	bindings := nat.PortMap{}
-	for _, spec := range svc.Ports {
-		mappings, err := nat.ParsePortSpec(spec)
+	for _, portSpec := range spec.Ports {
+		mappings, err := nat.ParsePortSpec(portSpec)
 		if err != nil {
-			return nil, nil, fmt.Errorf("parse port %q: %w", spec, err)
+			return nil, nil, fmt.Errorf("parse port %q: %w", portSpec, err)
 		}
 		for _, mapping := range mappings {
 			exposed[mapping.Port] = struct{}{}
@@ -475,17 +525,20 @@ func buildConfigs(svc *stack.Service) (*container.Config, *container.HostConfig,
 		}
 	}
 
-	cmd := svc.Command
+	cmd := spec.Command
 	var cmdSlice []string
 	if len(cmd) > 0 {
 		cmdSlice = append([]string(nil), cmd...)
 	}
 
 	config := &container.Config{
-		Image:        svc.Image,
+		Image:        spec.Image,
 		Env:          env,
 		Cmd:          strslice.StrSlice(cmdSlice),
 		ExposedPorts: exposed,
+	}
+	if spec.Workdir != "" {
+		config.WorkingDir = spec.Workdir
 	}
 	host := &container.HostConfig{PortBindings: bindings}
 	return config, host, nil

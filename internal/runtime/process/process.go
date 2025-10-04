@@ -24,20 +24,20 @@ func New() runtime.Runtime {
 	return &runtimeImpl{}
 }
 
-func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service) (runtime.Instance, error) {
-	if len(svc.Command) == 0 {
-		return nil, fmt.Errorf("process runtime for service %s requires a command", name)
+func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtime.Handle, error) {
+	if len(spec.Command) == 0 {
+		return nil, fmt.Errorf("process runtime for service %s requires a command", spec.Name)
 	}
 
-	cmd := exec.CommandContext(ctx, svc.Command[0], svc.Command[1:]...)
-	if svc.ResolvedWorkdir != "" {
-		cmd.Dir = svc.ResolvedWorkdir
+	cmd := exec.CommandContext(ctx, spec.Command[0], spec.Command[1:]...)
+	if spec.Workdir != "" {
+		cmd.Dir = spec.Workdir
 	}
 
 	env := os.Environ()
-	if svc.Env != nil {
-		envOverrides := make([]string, 0, len(svc.Env))
-		for k, v := range svc.Env {
+	if len(spec.Env) > 0 {
+		envOverrides := make([]string, 0, len(spec.Env))
+		for k, v := range spec.Env {
 			envOverrides = append(envOverrides, fmt.Sprintf("%s=%s", k, v))
 		}
 		env = append(env, envOverrides...)
@@ -46,26 +46,33 @@ func (r *runtimeImpl) Start(ctx context.Context, name string, svc *stack.Service
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("service %s stdout: %w", name, err)
+		return nil, fmt.Errorf("service %s stdout: %w", spec.Name, err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("service %s stderr: %w", name, err)
+		return nil, fmt.Errorf("service %s stderr: %w", spec.Name, err)
 	}
 
 	configureCmdSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start service %s: %w", name, err)
+		return nil, fmt.Errorf("start service %s: %w", spec.Name, err)
+	}
+
+	var health *stack.Health
+	if spec.Health != nil {
+		health = spec.Health.Clone()
+	} else if spec.Service != nil {
+		health = spec.Service.Health.Clone()
 	}
 
 	inst := &processInstance{
-		name:     name,
+		name:     spec.Name,
 		cmd:      cmd,
 		logs:     make(chan runtime.LogEntry, 64),
 		waitErr:  make(chan error, 1),
 		waitDone: make(chan struct{}),
-		health:   svc.Health.Clone(),
+		health:   health,
 	}
 
 	if inst.health != nil {
@@ -167,8 +174,32 @@ func (p *processInstance) Health() <-chan probe.State {
 	return p.healthCh
 }
 
-func (p *processInstance) Logs() <-chan runtime.LogEntry {
-	return p.logs
+func (p *processInstance) Logs(ctx context.Context) (<-chan runtime.LogEntry, error) {
+	if ctx == nil {
+		return p.logs, nil
+	}
+
+	out := make(chan runtime.LogEntry, cap(p.logs))
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case entry, ok := <-p.logs:
+				if !ok {
+					return
+				}
+				select {
+				case out <- entry:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	return out, nil
 }
 
 func (p *processInstance) streamLogs(r io.Reader, source string, wg *sync.WaitGroup) {
