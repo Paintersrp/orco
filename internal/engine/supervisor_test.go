@@ -165,7 +165,7 @@ func TestSupervisorBackoffJitter(t *testing.T) {
 	}
 }
 
-func TestSupervisorMaxRetriesEmitsCrashed(t *testing.T) {
+func TestSupervisorMaxRetriesEmitsFailed(t *testing.T) {
 	svc := &stack.Service{
 		RestartPolicy: &stack.RestartPolicy{
 			MaxRetries: 1,
@@ -195,19 +195,94 @@ func TestSupervisorMaxRetriesEmitsCrashed(t *testing.T) {
 
 	sup.Stop(context.Background())
 
-	found := false
+	crashed := false
+	failed := false
+	var failedErr error
 	for len(events) > 0 {
 		evt := <-events
 		if evt.Service != "api" {
 			continue
 		}
 		if evt.Type == EventTypeCrashed {
-			found = true
+			crashed = true
+		}
+		if evt.Type == EventTypeFailed {
+			failed = true
+			failedErr = evt.Err
 		}
 	}
 
-	if !found {
+	if !crashed {
 		t.Fatalf("expected crashed event after exhausting retries")
+	}
+	if !failed {
+		t.Fatalf("expected failed event after exhausting retries")
+	}
+	if !errors.Is(failedErr, inst2.waitErr) {
+		t.Fatalf("failed event should carry last error; got %v want %v", failedErr, inst2.waitErr)
+	}
+}
+
+func TestSupervisorStartFailuresEmitFailedEvent(t *testing.T) {
+	svc := &stack.Service{
+		RestartPolicy: &stack.RestartPolicy{
+			MaxRetries: 1,
+			Backoff: &stack.Backoff{
+				Min:    stack.Duration{Duration: 10 * time.Millisecond},
+				Max:    stack.Duration{Duration: 20 * time.Millisecond},
+				Factor: 2,
+			},
+		},
+	}
+
+	inst1 := &fakeInstance{startErr: errors.New("failed to start")}
+	inst2Err := errors.New("still failing")
+	inst2 := &fakeInstance{startErr: inst2Err}
+
+	events := make(chan Event, 32)
+	rt := &fakeRuntime{
+		instances: []*fakeInstance{inst1, inst2},
+		startCh:   make(chan struct{}, 2),
+	}
+
+	sup := newSupervisor("api", svc, rt, events)
+	sup.jitter = func(d time.Duration) time.Duration { return d }
+	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	sup.Start(context.Background())
+
+	waitForStart(t, rt.startCh)
+	waitForStart(t, rt.startCh)
+
+	if err := sup.AwaitReady(context.Background()); err == nil {
+		t.Fatalf("expected readiness failure")
+	}
+
+	sup.Stop(context.Background())
+
+	crashed := 0
+	failed := 0
+	for len(events) > 0 {
+		evt := <-events
+		if evt.Service != "api" {
+			continue
+		}
+		switch evt.Type {
+		case EventTypeCrashed:
+			crashed++
+		case EventTypeFailed:
+			failed++
+			if !errors.Is(evt.Err, inst2Err) {
+				t.Fatalf("failed event should carry final start error; got %v want %v", evt.Err, inst2Err)
+			}
+		}
+	}
+
+	if crashed != 2 {
+		t.Fatalf("expected two crashed events, got %d", crashed)
+	}
+	if failed != 1 {
+		t.Fatalf("expected one failed event, got %d", failed)
 	}
 }
 
