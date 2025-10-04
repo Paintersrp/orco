@@ -19,11 +19,8 @@ func (p *processInstance) Stop(ctx context.Context) error {
 	_ = p.cmd.Process.Signal(os.Interrupt)
 
 	select {
-	case err, ok := <-p.waitErr:
-		if ok {
-			return err
-		}
-		return nil
+	case <-p.waitDone:
+		return p.exitError()
 	case <-time.After(2 * time.Second):
 	case <-ctx.Done():
 		return ctx.Err()
@@ -32,8 +29,10 @@ func (p *processInstance) Stop(ctx context.Context) error {
 	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("kill process %s: %w", p.name, err)
 	}
-	if err, ok := <-p.waitErr; ok {
-		return err
+	select {
+	case <-p.waitDone:
+		return p.exitError()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }

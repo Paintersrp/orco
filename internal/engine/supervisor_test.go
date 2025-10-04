@@ -280,6 +280,14 @@ func (f *fakeInstance) WaitReady(ctx context.Context) error {
 	}
 }
 
+func (f *fakeInstance) Wait(ctx context.Context) error {
+	if f.waitErr != nil {
+		return f.waitErr
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func (f *fakeInstance) Health() <-chan probe.State {
 	return f.healthCh
 }

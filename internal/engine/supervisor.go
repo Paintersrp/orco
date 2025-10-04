@@ -294,6 +294,13 @@ func (s *supervisor) manageInstance(instance runtime.Instance) (error, bool) {
 	healthCh := instance.Health()
 	readyObserved := false
 
+	waitCh := make(chan error, 1)
+	waitCtx, waitCancel := context.WithCancel(context.Background())
+	go func() {
+		waitCh <- instance.Wait(waitCtx)
+	}()
+	defer waitCancel()
+
 	for {
 		select {
 		case err := <-readyCh:
@@ -355,6 +362,31 @@ func (s *supervisor) manageInstance(instance runtime.Instance) (error, bool) {
 				}
 				return errors.New("service reported unready"), readyObserved
 			}
+		case err := <-waitCh:
+			waitCh = nil
+			if s.ctx.Err() != nil {
+				if !readyObserved {
+					s.deliverInitial(s.ctx.Err())
+				}
+				stopCtx := s.stopContext()
+				stopErr := s.stopInstance(instance, stopCtx)
+				s.setStopErr(stopErr)
+				logWG.Wait()
+				sendEvent(s.events, s.name, EventTypeStopped, "service stopped", nil)
+				return nil, readyObserved
+			}
+			exitErr := err
+			if exitErr == nil {
+				exitErr = fmt.Errorf("service %s exited unexpectedly", s.name)
+			}
+			if !readyObserved {
+				s.deliverInitial(exitErr)
+			}
+			ctx, cancel := failureStopContext()
+			_ = s.stopInstance(instance, ctx)
+			cancel()
+			logWG.Wait()
+			return exitErr, readyObserved
 		case <-s.ctx.Done():
 			if !readyObserved {
 				s.deliverInitial(s.ctx.Err())

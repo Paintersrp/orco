@@ -294,6 +294,15 @@ func (i *dockerInstance) WaitReady(ctx context.Context) error {
 	}
 }
 
+func (i *dockerInstance) Wait(ctx context.Context) error {
+	select {
+	case <-i.waitDone:
+		return waitOutcomeExitError(i.waitResult)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (i *dockerInstance) Health() <-chan probe.State {
 	if i.svc == nil || i.svc.Health == nil {
 		return nil
@@ -321,6 +330,10 @@ func (i *dockerInstance) Stop(ctx context.Context) error {
 			return
 		}
 		i.stopErr = nil
+		select {
+		case <-i.waitDone:
+		case <-ctx.Done():
+		}
 	})
 	return i.stopErr
 }
@@ -351,6 +364,19 @@ func waitOutcomeError(outcome waitOutcome) error {
 		return errors.New(outcome.status.Error.Message)
 	}
 	return errors.New("container exited before ready")
+}
+
+func waitOutcomeExitError(outcome waitOutcome) error {
+	if outcome.err != nil {
+		return outcome.err
+	}
+	if outcome.status.Error != nil {
+		return errors.New(outcome.status.Error.Message)
+	}
+	if outcome.status.StatusCode != 0 {
+		return fmt.Errorf("container exited with status %d", outcome.status.StatusCode)
+	}
+	return nil
 }
 
 type logWriter struct {
