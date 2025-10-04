@@ -16,7 +16,10 @@ import (
 )
 
 func newLogsCmd(ctx *context) *cobra.Command {
-	var follow bool
+	var (
+		follow bool
+		since  time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "logs [service]",
 		Short: "Tail structured logs",
@@ -35,6 +38,10 @@ func newLogsCmd(ctx *context) *cobra.Command {
 			}
 
 			const logBufferSize = 256
+			var cutoff time.Time
+			if since > 0 {
+				cutoff = time.Now().Add(-since)
+			}
 			events := make(chan engine.Event, logBufferSize)
 			mux := logmux.New(logBufferSize)
 			mux.Add(events)
@@ -51,6 +58,15 @@ func newLogsCmd(ctx *context) *cobra.Command {
 					}
 					if filter != "" && event.Service != filter {
 						continue
+					}
+					if !cutoff.IsZero() {
+						ts := event.Timestamp
+						if ts.IsZero() {
+							ts = time.Now()
+						}
+						if ts.Before(cutoff) {
+							continue
+						}
 					}
 					cliutil.EncodeLogEvent(encoder, cmd.ErrOrStderr(), event)
 				}
@@ -87,5 +103,6 @@ func newLogsCmd(ctx *context) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
+	cmd.Flags().DurationVar(&since, "since", 0, "Only include log entries newer than this duration")
 	return cmd
 }

@@ -70,3 +70,53 @@ services:
 		t.Fatalf("expected no stderr output, got: %s", stderr.String())
 	}
 }
+
+func TestLogsCommandSinceFiltersOldEntries(t *testing.T) {
+	t.Parallel()
+
+	rt := newMockRuntime()
+	rt.logs["api"] = []runtimelib.LogEntry{
+		{Message: "too old", Source: runtimelib.LogSourceStdout, Timestamp: time.Now().Add(-2 * time.Minute)},
+		{Message: "still relevant", Source: runtimelib.LogSourceStdout, Timestamp: time.Now().Add(-30 * time.Second)},
+	}
+
+	stackPath := writeStackFile(t, `version: "0.1"
+stack:
+  name: "demo"
+  workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
+services:
+  api:
+    runtime: process
+    command: ["sleep", "0"]
+`)
+
+	ctx := &context{
+		stackFile:    &stackPath,
+		orchestrator: engine.NewOrchestrator(runtimelib.Registry{"process": rt}),
+	}
+
+	cmd := newLogsCmd(ctx)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--since", "1m"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("logs command failed: %v\nstderr: %s", err, stderr.String())
+	}
+
+	output := stdout.String()
+	if strings.Contains(output, "too old") {
+		t.Fatalf("expected old log entries to be filtered out, got: %s", output)
+	}
+	if !strings.Contains(output, "still relevant") {
+		t.Fatalf("expected recent log entry to be present, got: %s", output)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr output, got: %s", stderr.String())
+	}
+}
