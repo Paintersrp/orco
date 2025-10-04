@@ -11,10 +11,12 @@ import (
 // Duration wraps time.Duration for YAML unmarshalling.
 type Duration struct {
 	time.Duration
+	explicit bool
 }
 
 // UnmarshalText parses a textual duration, accepting empty strings.
 func (d *Duration) UnmarshalText(text []byte) error {
+	d.explicit = true
 	if len(text) == 0 {
 		d.Duration = 0
 		return nil
@@ -30,6 +32,11 @@ func (d *Duration) UnmarshalText(text []byte) error {
 // MarshalText renders the duration using time.Duration formatting.
 func (d Duration) MarshalText() ([]byte, error) {
 	return []byte(d.Duration.String()), nil
+}
+
+// IsSet reports whether the duration was explicitly provided or non-zero.
+func (d Duration) IsSet() bool {
+	return d.explicit || d.Duration != 0
 }
 
 // Stack mirrors the stack.yaml document structure.
@@ -313,7 +320,7 @@ func (p *ProbeSpec) ApplyDefaults(defaults *ProbeSpec) {
 			}
 		}
 	}
-	if p.GracePeriod.Duration == 0 {
+	if !p.GracePeriod.IsSet() {
 		p.GracePeriod = defaults.GracePeriod
 	}
 	if p.Interval.Duration == 0 {
