@@ -167,6 +167,16 @@ func (s *Stack) Validate() error {
 		if svc.Runtime != "docker" && svc.Runtime != "process" {
 			return fmt.Errorf("%s: unsupported runtime %q (supported values: docker, process)", serviceField(name, "runtime"), svc.Runtime)
 		}
+		if svc.Runtime == "docker" {
+			if strings.TrimSpace(svc.Image) == "" {
+				return fmt.Errorf("%s: is required", serviceField(name, "image"))
+			}
+		}
+		if svc.Runtime == "process" {
+			if len(svc.Command) == 0 {
+				return fmt.Errorf("%s: must contain at least one entry", serviceField(name, "command"))
+			}
+		}
 		if svc.Health != nil {
 			if err := validateProbe(name, svc.Health); err != nil {
 				return err
