@@ -2,18 +2,28 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
 
 	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/runtime"
 	"github.com/example/orco/internal/stack"
 )
+
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
 
 func requireDocker(t *testing.T) {
 	t.Helper()
@@ -217,5 +227,72 @@ func TestRuntimeContainerExitSurfaced(t *testing.T) {
 
 	if err := inst.WaitReady(ctx); err == nil {
 		t.Fatal("expected wait ready error")
+	}
+}
+
+func TestRuntimeKillContextCancel(t *testing.T) {
+	requireDocker(t)
+
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Fatalf("docker client: %v", err)
+	}
+	defer cli.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	const image = "ghcr.io/library/alpine:3.19"
+	if err := ensureImage(ctx, cli, image); err != nil {
+		t.Fatalf("ensure image: %v", err)
+	}
+
+	config := &container.Config{
+		Image: image,
+		Cmd:   strslice.StrSlice([]string{"sh", "-c", "while true; do sleep 1; done"}),
+	}
+
+	createResp, err := cli.ContainerCreate(ctx, config, nil, nil, nil, "")
+	if err != nil {
+		t.Fatalf("container create: %v", err)
+	}
+	containerID := createResp.ID
+	defer func() {
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer removeCancel()
+		_ = cli.ContainerRemove(removeCtx, containerID, types.ContainerRemoveOptions{Force: true})
+	}()
+
+	if err := cli.ContainerStart(ctx, containerID, types.ContainerStartOptions{}); err != nil {
+		t.Fatalf("container start: %v", err)
+	}
+
+	inst := &dockerInstance{
+		cli:         cli,
+		containerID: containerID,
+		logs:        nil,
+		logDone:     closedChan(),
+		healthDone:  closedChan(),
+		waitDone:    make(chan struct{}),
+	}
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		inst.waitResult = waitOutcome{status: container.WaitResponse{StatusCode: 0}}
+		close(inst.waitDone)
+	}()
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer stopCancel()
+
+	err = inst.Kill(stopCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+
+	select {
+	case <-inst.waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitDone not closed")
 	}
 }
