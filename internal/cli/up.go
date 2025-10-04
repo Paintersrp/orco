@@ -30,13 +30,13 @@ func newUpCmd(ctx *context) *cobra.Command {
 			if !supportsInteractiveOutput(cmd) {
 				return runUpNonInteractive(cmd, ctx, doc)
 			}
-			return runUpInteractive(cmd, ctx, doc)
+			return runStackTUI(cmd, ctx, doc)
 		},
 	}
 	return cmd
 }
 
-func runUpInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
+func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
 	ui := tui.New()
 	uiErrCh := make(chan error, 1)
 	go func() {
@@ -79,6 +79,10 @@ func runUpInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocume
 	}
 
 	return retErr
+}
+
+func runUpInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
+	return runStackTUI(cmd, ctx, doc)
 }
 
 func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
