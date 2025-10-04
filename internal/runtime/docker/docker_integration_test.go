@@ -42,7 +42,17 @@ func TestRuntimeStartStopLogs(t *testing.T) {
 		Command: []string{"sh", "-c", "while true; do echo orco-ready; sleep 1; done"},
 	}
 
-	inst, err := rt.Start(ctx, "log-loop", svc)
+	spec := runtime.StartSpec{
+		Name:    "log-loop",
+		Image:   svc.Image,
+		Command: svc.Command,
+		Env:     svc.Env,
+		Ports:   svc.Ports,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := rt.Start(ctx, spec)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -56,7 +66,10 @@ func TestRuntimeStartStopLogs(t *testing.T) {
 		t.Fatalf("wait ready: %v", err)
 	}
 
-	logs := inst.Logs()
+	logs, err := inst.Logs(ctx)
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
 	if logs == nil {
 		t.Fatal("logs channel is nil")
 	}
@@ -116,7 +129,17 @@ func TestRuntimeHTTPHealth(t *testing.T) {
 		},
 	}
 
-	inst, err := rt.Start(ctx, "nginx", svc)
+	spec := runtime.StartSpec{
+		Name:    "nginx",
+		Image:   svc.Image,
+		Command: svc.Command,
+		Env:     svc.Env,
+		Ports:   svc.Ports,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := rt.Start(ctx, spec)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -172,7 +195,17 @@ func TestRuntimeContainerExitSurfaced(t *testing.T) {
 		Command: []string{"sh", "-c", "exit 2"},
 	}
 
-	inst, err := rt.Start(ctx, "exit", svc)
+	spec := runtime.StartSpec{
+		Name:    "exit",
+		Image:   svc.Image,
+		Command: svc.Command,
+		Env:     svc.Env,
+		Ports:   svc.Ports,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := rt.Start(ctx, spec)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}

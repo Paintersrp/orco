@@ -232,7 +232,7 @@ type fakeRuntime struct {
 	startCh   chan struct{}
 }
 
-func (f *fakeRuntime) Start(ctx context.Context, name string, svc *stack.Service) (runtime.Instance, error) {
+func (f *fakeRuntime) Start(ctx context.Context, spec runtime.StartSpec) (runtime.Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.instances) == 0 {
@@ -311,6 +311,10 @@ func (f *fakeInstance) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (f *fakeInstance) Logs() <-chan runtime.LogEntry {
-	return f.logsCh
+func (f *fakeInstance) Kill(ctx context.Context) error {
+	return f.Stop(ctx)
+}
+
+func (f *fakeInstance) Logs(ctx context.Context) (<-chan runtime.LogEntry, error) {
+	return f.logsCh, nil
 }

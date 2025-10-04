@@ -57,7 +57,7 @@ type supervisor struct {
 	done chan struct{}
 
 	mu      sync.Mutex
-	current runtime.Instance
+	current runtime.Handle
 	stopCtx context.Context
 	stopErr error
 	runErr  error
@@ -82,6 +82,31 @@ func newSupervisor(name string, svc *stack.Service, rt runtime.Runtime, events c
 	sup.sleep = sleepWithContext
 
 	return sup
+}
+
+func buildStartSpec(name string, svc *stack.Service) runtime.StartSpec {
+	spec := runtime.StartSpec{Name: name}
+	if svc == nil {
+		return spec
+	}
+	spec.Image = svc.Image
+	if len(svc.Command) > 0 {
+		spec.Command = append([]string(nil), svc.Command...)
+	}
+	if len(svc.Env) > 0 {
+		env := make(map[string]string, len(svc.Env))
+		for k, v := range svc.Env {
+			env[k] = v
+		}
+		spec.Env = env
+	}
+	if len(svc.Ports) > 0 {
+		spec.Ports = append([]string(nil), svc.Ports...)
+	}
+	spec.Workdir = svc.ResolvedWorkdir
+	spec.Health = svc.Health
+	spec.Service = svc.Clone()
+	return spec
 }
 
 func deriveRestartPolicy(svc *stack.Service) restartPolicy {
@@ -175,7 +200,8 @@ func (s *supervisor) run() {
 
 		sendEvent(s.events, s.name, EventTypeStarting, "starting service", nil)
 
-		instance, err := s.runtime.Start(s.ctx, s.name, s.service)
+		spec := buildStartSpec(s.name, s.service)
+		instance, err := s.runtime.Start(s.ctx, spec)
 		if err != nil {
 			if s.ctx.Err() != nil {
 				s.deliverStarted(s.ctx.Err())
@@ -279,11 +305,16 @@ func (s *supervisor) sleepBackoff(base *time.Duration) error {
 	return nil
 }
 
-func (s *supervisor) manageInstance(instance runtime.Instance) (error, bool) {
+func (s *supervisor) manageInstance(instance runtime.Handle) (error, bool) {
 	var logWG sync.WaitGroup
-	if logs := instance.Logs(); logs != nil {
-		logWG.Add(1)
-		go s.streamLogs(logs, &logWG)
+	if instance != nil {
+		logs, err := instance.Logs(s.ctx)
+		if err != nil {
+			sendEvent(s.events, s.name, EventTypeError, "log stream unavailable", err)
+		} else if logs != nil {
+			logWG.Add(1)
+			go s.streamLogs(logs, &logWG)
+		}
 	}
 
 	readyCh := make(chan error, 1)
@@ -486,7 +517,7 @@ func (s *supervisor) emitDropped(count int, block bool) bool {
 	return s.emitLog(evt, block)
 }
 
-func (s *supervisor) stopInstance(instance runtime.Instance, ctx context.Context) error {
+func (s *supervisor) stopInstance(instance runtime.Handle, ctx context.Context) error {
 	if instance == nil {
 		return nil
 	}
@@ -500,7 +531,7 @@ func failureStopContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), instanceStopTimeout)
 }
 
-func (s *supervisor) setCurrent(inst runtime.Instance) {
+func (s *supervisor) setCurrent(inst runtime.Handle) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.current = inst

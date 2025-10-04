@@ -14,7 +14,6 @@ import (
 	"github.com/example/orco/internal/engine"
 	"github.com/example/orco/internal/probe"
 	"github.com/example/orco/internal/runtime"
-	"github.com/example/orco/internal/stack"
 )
 
 func TestUpCommandStartsServicesInDependencyOrder(t *testing.T) {
@@ -275,9 +274,8 @@ func newBlockingRuntime(stopRelease <-chan struct{}) *blockingRuntime {
 	}
 }
 
-func (b *blockingRuntime) Start(ctx stdcontext.Context, name string, svc *stack.Service) (runtime.Instance, error) {
-	_ = name
-	_ = svc
+func (b *blockingRuntime) Start(ctx stdcontext.Context, spec runtime.StartSpec) (runtime.Handle, error) {
+	_ = spec
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		b.readyOnce.Do(func() {
@@ -325,8 +323,12 @@ func (i *blockingInstance) Stop(ctx stdcontext.Context) error {
 	}
 }
 
-func (i *blockingInstance) Logs() <-chan runtime.LogEntry {
-	return nil
+func (i *blockingInstance) Kill(ctx stdcontext.Context) error {
+	return i.Stop(ctx)
+}
+
+func (i *blockingInstance) Logs(ctx stdcontext.Context) (<-chan runtime.LogEntry, error) {
+	return nil, nil
 }
 
 type mockRuntime struct {
@@ -353,7 +355,8 @@ func newMockRuntime() *mockRuntime {
 	}
 }
 
-func (m *mockRuntime) Start(ctx stdcontext.Context, name string, svc *stack.Service) (runtime.Instance, error) {
+func (m *mockRuntime) Start(ctx stdcontext.Context, spec runtime.StartSpec) (runtime.Handle, error) {
+	name := spec.Name
 	m.mu.Lock()
 	if err := m.startErr[name]; err != nil {
 		m.mu.Unlock()
@@ -481,6 +484,10 @@ func (i *mockInstance) Stop(ctx stdcontext.Context) error {
 	return err
 }
 
-func (i *mockInstance) Logs() <-chan runtime.LogEntry {
-	return i.logs
+func (i *mockInstance) Kill(ctx stdcontext.Context) error {
+	return i.Stop(ctx)
+}
+
+func (i *mockInstance) Logs(ctx stdcontext.Context) (<-chan runtime.LogEntry, error) {
+	return i.logs, nil
 }

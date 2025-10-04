@@ -198,7 +198,16 @@ func TestStartPreservesBaseEnvironment(t *testing.T) {
 		Command: []string{"/bin/sh", "-c", "echo $PATH"},
 	}
 
-	inst, err := New().Start(context.Background(), "env-check", svc)
+	spec := runtimelib.StartSpec{
+		Name:    "env-check",
+		Command: svc.Command,
+		Env:     svc.Env,
+		Workdir: svc.ResolvedWorkdir,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := New().Start(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("start service: %v", err)
 	}
@@ -206,7 +215,10 @@ func TestStartPreservesBaseEnvironment(t *testing.T) {
 		t.Fatalf("expected *processInstance, got %T", inst)
 	}
 
-	logs := inst.Logs()
+	logs, err := inst.Logs(context.Background())
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
 	if logs == nil {
 		t.Fatalf("logs channel is nil")
 	}
@@ -251,7 +263,16 @@ func TestStartSetsWorkingDirectory(t *testing.T) {
 		ResolvedWorkdir: workdir,
 	}
 
-	inst, err := New().Start(context.Background(), "workdir-check", svc)
+	spec := runtimelib.StartSpec{
+		Name:    "workdir-check",
+		Command: svc.Command,
+		Env:     svc.Env,
+		Workdir: svc.ResolvedWorkdir,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := New().Start(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("start service: %v", err)
 	}
@@ -307,7 +328,16 @@ func TestStopTerminatesProcessGroup(t *testing.T) {
 		Command: []string{scriptPath, parentPIDPath, childPIDPath},
 	}
 
-	inst, err := New().Start(context.Background(), "process-group", svc)
+	spec := runtimelib.StartSpec{
+		Name:    "process-group",
+		Command: svc.Command,
+		Env:     svc.Env,
+		Workdir: svc.ResolvedWorkdir,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := New().Start(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("start service: %v", err)
 	}
