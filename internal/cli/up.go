@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/example/orco/internal/cliutil"
 	"github.com/example/orco/internal/engine"
+	"github.com/example/orco/internal/tui"
 )
 
 func newUpCmd(ctx *context) *cobra.Command {
@@ -25,53 +27,118 @@ func newUpCmd(ctx *context) *cobra.Command {
 				return err
 			}
 
-			events := make(chan engine.Event, 64)
-			var printer sync.WaitGroup
-			printer.Add(1)
-			go func() {
-				defer printer.Done()
-				printEvents(cmd.OutOrStdout(), cmd.ErrOrStderr(), events)
-			}()
-
-			runCtx, runCancel := stdcontext.WithCancel(stdcontext.WithoutCancel(cmd.Context()))
-			defer runCancel()
-
-			cancelGuard := stdcontext.AfterFunc(cmd.Context(), runCancel)
-			defer cancelGuard()
-
-			var deployment *engine.Deployment
-			defer func() {
-				if deployment != nil {
-					stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
-					if err := deployment.Stop(stopCtx, events); err != nil {
-						if retErr == nil {
-							retErr = err
-						}
-					} else {
-						fmt.Fprintln(cmd.OutOrStdout(), "Services shut down cleanly.")
-					}
-					cancel()
-				}
-				close(events)
-				printer.Wait()
-			}()
-
-			orch := ctx.getOrchestrator()
-			var depErr error
-			deployment, depErr = orch.Up(runCtx, doc.File, doc.Graph, events)
-			cancelGuard()
-			if depErr != nil {
-				return depErr
+			if !supportsInteractiveOutput(cmd) {
+				return runUpNonInteractive(cmd, ctx, doc)
 			}
-
-			fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
-
-			<-cmd.Context().Done()
-
-			return retErr
+			return runUpInteractive(cmd, ctx, doc)
 		},
 	}
 	return cmd
+}
+
+func runUpInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
+	ui := tui.New()
+	uiErrCh := make(chan error, 1)
+	go func() {
+		uiErrCh <- ui.Run(cmd.Context())
+	}()
+
+	runCtx, runCancel := stdcontext.WithCancel(stdcontext.WithoutCancel(cmd.Context()))
+	defer runCancel()
+
+	cancelGuard := stdcontext.AfterFunc(cmd.Context(), runCancel)
+	defer cancelGuard()
+
+	var deployment *engine.Deployment
+	defer func() {
+		if deployment != nil {
+			stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
+			if err := deployment.Stop(stopCtx, ui.EventSink()); err != nil && retErr == nil {
+				retErr = err
+			}
+			cancel()
+		}
+		ui.CloseEvents()
+		ui.Stop()
+		if uiErr := <-uiErrCh; uiErr != nil && retErr == nil {
+			retErr = uiErr
+		}
+	}()
+
+	orch := ctx.getOrchestrator()
+	var depErr error
+	deployment, depErr = orch.Up(runCtx, doc.File, doc.Graph, ui.EventSink())
+	cancelGuard()
+	if depErr != nil {
+		return depErr
+	}
+
+	select {
+	case <-cmd.Context().Done():
+	case <-ui.Done():
+	}
+
+	return retErr
+}
+
+func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
+	events := make(chan engine.Event, 64)
+	var printer sync.WaitGroup
+	printer.Add(1)
+	go func() {
+		defer printer.Done()
+		printEvents(cmd.OutOrStdout(), cmd.ErrOrStderr(), events)
+	}()
+
+	runCtx, runCancel := stdcontext.WithCancel(stdcontext.WithoutCancel(cmd.Context()))
+	defer runCancel()
+
+	cancelGuard := stdcontext.AfterFunc(cmd.Context(), runCancel)
+	defer cancelGuard()
+
+	var deployment *engine.Deployment
+	defer func() {
+		if deployment != nil {
+			stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
+			if err := deployment.Stop(stopCtx, events); err != nil && retErr == nil {
+				retErr = err
+			} else if err == nil {
+				fmt.Fprintln(cmd.OutOrStdout(), "Services shut down cleanly.")
+			}
+			cancel()
+		}
+		close(events)
+		printer.Wait()
+	}()
+
+	orch := ctx.getOrchestrator()
+	var depErr error
+	deployment, depErr = orch.Up(runCtx, doc.File, doc.Graph, events)
+	cancelGuard()
+	if depErr != nil {
+		return depErr
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
+
+	<-cmd.Context().Done()
+
+	return retErr
+}
+
+func supportsInteractiveOutput(cmd *cobra.Command) bool {
+	return isTerminalWriter(cmd.OutOrStdout()) && isTerminalWriter(cmd.ErrOrStderr())
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	type fdWriter interface {
+		Fd() uintptr
+	}
+	f, ok := w.(fdWriter)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
 }
 
 func printEvents(stdout, stderr io.Writer, events <-chan engine.Event) {
