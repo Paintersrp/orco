@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/example/orco/internal/config"
+	"github.com/Paintersrp/orco/internal/config"
 )
 
 func newConfigCmd() *cobra.Command {

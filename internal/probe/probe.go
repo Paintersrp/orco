@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 // Status captures the readiness condition surfaced by a probe watcher.

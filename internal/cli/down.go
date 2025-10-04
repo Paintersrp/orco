@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/example/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/engine"
 )
 
 func newDownCmd(ctx *context) *cobra.Command {

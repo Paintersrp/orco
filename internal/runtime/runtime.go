@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/example/orco/internal/probe"
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/probe"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 // Handle represents a single running service instance managed by a runtime

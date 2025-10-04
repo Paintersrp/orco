@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	runtimelib "github.com/example/orco/internal/runtime"
-	"github.com/example/orco/internal/stack"
+	runtimelib "github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 func TestOrchestratorGatesOnStartedRequirement(t *testing.T) {

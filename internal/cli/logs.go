@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/example/orco/internal/cliutil"
-	"github.com/example/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/cliutil"
+	"github.com/Paintersrp/orco/internal/engine"
 )
 
 func newLogsCmd(ctx *context) *cobra.Command {

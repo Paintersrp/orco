@@ -9,11 +9,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/example/orco/internal/cliutil"
-	"github.com/example/orco/internal/engine"
-	"github.com/example/orco/internal/runtime"
-	"github.com/example/orco/internal/runtime/docker"
-	"github.com/example/orco/internal/runtime/process"
+	"github.com/Paintersrp/orco/internal/cliutil"
+	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/runtime/docker"
+	"github.com/Paintersrp/orco/internal/runtime/process"
 )
 
 func NewRootCmd() *cobra.Command {

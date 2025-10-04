@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 func TestWatchHTTPTransitions(t *testing.T) {

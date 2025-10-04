@@ -14,9 +14,9 @@ import (
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
 
-	"github.com/example/orco/internal/probe"
-	"github.com/example/orco/internal/runtime"
-	"github.com/example/orco/internal/stack"
+	"github.com/Paintersrp/orco/internal/probe"
+	"github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 func closedChan() chan struct{} {
