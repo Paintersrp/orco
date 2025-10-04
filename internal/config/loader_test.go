@@ -213,6 +213,53 @@ services:
 	}
 }
 
+func TestLoadServiceGracePeriodZeroOverridesDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+defaults:
+  health:
+    gracePeriod: 45s
+    interval: 2s
+    timeout: 1s
+    http:
+      url: http://localhost:8080/health
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    health:
+      gracePeriod: 0s
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	svc := doc.Services["api"]
+	if svc == nil {
+		t.Fatalf("service api missing")
+	}
+	if svc.Health == nil {
+		t.Fatalf("health probe not loaded")
+	}
+	if got, want := svc.Health.GracePeriod.Duration, time.Duration(0); got != want {
+		t.Fatalf("grace period override mismatch: got %v want %v", got, want)
+	}
+	if got, want := svc.Health.Interval.Duration, 2*time.Second; got != want {
+		t.Fatalf("interval default mismatch: got %v want %v", got, want)
+	}
+	if got, want := svc.Health.Timeout.Duration, time.Second; got != want {
+		t.Fatalf("timeout default mismatch: got %v want %v", got, want)
+	}
+}
+
 func TestLoadServiceOverridesProbeType(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")
