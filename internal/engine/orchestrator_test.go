@@ -279,6 +279,153 @@ verify:
 	}
 }
 
+func TestOrchestratorEmitsLifecycleMetadata(t *testing.T) {
+	instance := &fakeInstance{waitCh: make(chan error, 1)}
+	rt := newRecordingRuntime(map[string]*fakeInstance{
+		"app": instance,
+	})
+
+	doc := &stack.StackFile{
+		Services: map[string]*stack.Service{
+			"app": {Runtime: "test"},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 32)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	waitForServiceStart(t, rt.startCh)
+
+	instance.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	recorded := make([]Event, 0, 4)
+	startupDeadline := time.After(time.Second)
+	for len(recorded) < 2 {
+		select {
+		case evt := <-events:
+			recorded = append(recorded, evt)
+		case <-startupDeadline:
+			t.Fatalf("timed out waiting for startup events; got %v", recorded)
+		}
+	}
+
+	var starting Event
+	var ready Event
+	foundStart := false
+	foundReady := false
+	for _, evt := range recorded {
+		if evt.Service != "app" {
+			continue
+		}
+		switch evt.Type {
+		case EventTypeStarting:
+			if !foundStart {
+				starting = evt
+				foundStart = true
+			}
+		case EventTypeReady:
+			if !foundReady {
+				ready = evt
+				foundReady = true
+			}
+		}
+	}
+
+	if !foundStart {
+		t.Fatalf("missing starting event")
+	}
+	if starting.Attempt != 1 || starting.Reason != ReasonInitialStart {
+		t.Fatalf("starting metadata mismatch: %+v", starting)
+	}
+
+	if !foundReady {
+		t.Fatalf("missing ready event")
+	}
+	if ready.Attempt != 1 || ready.Reason != ReasonProbeReady {
+		t.Fatalf("ready metadata mismatch: %+v", ready)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	var stopping Event
+	var stopped Event
+	foundStopping := false
+	foundStopped := false
+	stopDeadline := time.After(time.Second)
+stopLoop:
+	for {
+		if foundStopping && foundStopped {
+			break stopLoop
+		}
+		select {
+		case evt := <-events:
+			recorded = append(recorded, evt)
+			if evt.Service != "app" {
+				continue
+			}
+			switch evt.Type {
+			case EventTypeStopping:
+				if !foundStopping {
+					stopping = evt
+					foundStopping = true
+				}
+			case EventTypeStopped:
+				if !foundStopped {
+					stopped = evt
+					foundStopped = true
+				}
+			}
+		case <-stopDeadline:
+			break stopLoop
+		}
+	}
+
+	if !foundStopping {
+		t.Fatalf("missing stopping event")
+	}
+	if stopping.Attempt != 0 || stopping.Reason != ReasonShutdown {
+		t.Fatalf("stopping metadata mismatch: %+v", stopping)
+	}
+
+	if !foundStopped {
+		t.Fatalf("missing stopped event")
+	}
+	if stopped.Attempt != 1 || stopped.Reason != ReasonSupervisorStop {
+		t.Fatalf("stopped metadata mismatch: %+v", stopped)
+	}
+}
+
 type recordingRuntime struct {
 	mu        sync.Mutex
 	instances map[string]*fakeInstance

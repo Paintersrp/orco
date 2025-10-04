@@ -70,32 +70,83 @@ func TestSupervisorRestartsOnUnready(t *testing.T) {
 	second.healthCh <- probe.State{Status: probe.StatusReady}
 
 	// Collect events until the second instance reports readiness.
-	var types []EventType
+	var observed []Event
 	deadline := time.After(time.Second)
+eventsLoop:
 	for {
-		if len(types) >= 6 {
-			break
-		}
 		select {
 		case evt := <-events:
 			if evt.Service != "web" {
 				continue
 			}
-			types = append(types, evt.Type)
-			if evt.Type == EventTypeReady {
-				// The restart cycle completed.
-				if len(types) >= 6 {
-					break
-				}
+			observed = append(observed, evt)
+			if evt.Type == EventTypeReady && evt.Attempt == 2 {
+				break eventsLoop
 			}
 		case <-deadline:
-			t.Fatalf("timed out waiting for events; got %v", types)
+			t.Fatalf("timed out waiting for events; got %v", observed)
 		}
+	}
+
+	types := make([]EventType, 0, len(observed))
+	for _, evt := range observed {
+		types = append(types, evt.Type)
 	}
 
 	// Expect at least one unready, crash and a subsequent starting event.
 	if !containsSequence(types, []EventType{EventTypeUnready, EventTypeCrashed, EventTypeStarting, EventTypeReady}) {
 		t.Fatalf("expected restart sequence, got %v", types)
+	}
+
+	var startingEvents []Event
+	var readyEvents []Event
+	var unreadyEvents []Event
+	var crashedEvents []Event
+	for _, evt := range observed {
+		switch evt.Type {
+		case EventTypeStarting:
+			startingEvents = append(startingEvents, evt)
+		case EventTypeReady:
+			readyEvents = append(readyEvents, evt)
+		case EventTypeUnready:
+			unreadyEvents = append(unreadyEvents, evt)
+		case EventTypeCrashed:
+			crashedEvents = append(crashedEvents, evt)
+		}
+	}
+
+	if len(startingEvents) < 2 {
+		t.Fatalf("expected two starting events, got %d", len(startingEvents))
+	}
+	if startingEvents[0].Attempt != 1 || startingEvents[0].Reason != ReasonInitialStart {
+		t.Fatalf("first start attempt metadata mismatch: %+v", startingEvents[0])
+	}
+	if startingEvents[1].Attempt != 2 || startingEvents[1].Reason != ReasonRestart {
+		t.Fatalf("restart attempt metadata mismatch: %+v", startingEvents[1])
+	}
+
+	if len(readyEvents) < 2 {
+		t.Fatalf("expected two ready events, got %d", len(readyEvents))
+	}
+	if readyEvents[0].Attempt != 1 || readyEvents[0].Reason != ReasonProbeReady {
+		t.Fatalf("first ready metadata mismatch: %+v", readyEvents[0])
+	}
+	if readyEvents[1].Attempt != 2 || readyEvents[1].Reason != ReasonProbeReady {
+		t.Fatalf("second ready metadata mismatch: %+v", readyEvents[1])
+	}
+
+	if len(unreadyEvents) == 0 {
+		t.Fatalf("expected unready event")
+	}
+	if unreadyEvents[0].Attempt != 1 || unreadyEvents[0].Reason != ReasonProbeUnready {
+		t.Fatalf("unready metadata mismatch: %+v", unreadyEvents[0])
+	}
+
+	if len(crashedEvents) == 0 {
+		t.Fatalf("expected crash event")
+	}
+	if crashedEvents[0].Attempt != 1 || crashedEvents[0].Reason != ReasonInstanceCrash {
+		t.Fatalf("crash metadata mismatch: %+v", crashedEvents[0])
 	}
 
 	if err := sup.Stop(context.Background()); err != nil {
@@ -195,28 +246,38 @@ func TestSupervisorMaxRetriesEmitsFailed(t *testing.T) {
 
 	sup.Stop(context.Background())
 
-	crashed := false
-	failed := false
+	var crashedEvents []Event
+	var failedEvents []Event
 	var failedErr error
 	for len(events) > 0 {
 		evt := <-events
 		if evt.Service != "api" {
 			continue
 		}
-		if evt.Type == EventTypeCrashed {
-			crashed = true
-		}
-		if evt.Type == EventTypeFailed {
-			failed = true
+		switch evt.Type {
+		case EventTypeCrashed:
+			crashedEvents = append(crashedEvents, evt)
+		case EventTypeFailed:
+			failedEvents = append(failedEvents, evt)
 			failedErr = evt.Err
 		}
 	}
 
-	if !crashed {
-		t.Fatalf("expected crashed event after exhausting retries")
+	if len(crashedEvents) != 2 {
+		t.Fatalf("expected two crashed events, got %d", len(crashedEvents))
 	}
-	if !failed {
+	if crashedEvents[0].Attempt != 1 || crashedEvents[0].Reason != ReasonInstanceCrash {
+		t.Fatalf("first crash metadata mismatch: %+v", crashedEvents[0])
+	}
+	if crashedEvents[1].Attempt != 2 || crashedEvents[1].Reason != ReasonInstanceCrash {
+		t.Fatalf("second crash metadata mismatch: %+v", crashedEvents[1])
+	}
+
+	if len(failedEvents) != 1 {
 		t.Fatalf("expected failed event after exhausting retries")
+	}
+	if failedEvents[0].Attempt != 2 || failedEvents[0].Reason != ReasonRetriesExhaust {
+		t.Fatalf("failed event metadata mismatch: %+v", failedEvents[0])
 	}
 	if !errors.Is(failedErr, inst2.waitErr) {
 		t.Fatalf("failed event should carry last error; got %v want %v", failedErr, inst2.waitErr)
@@ -260,8 +321,8 @@ func TestSupervisorStartFailuresEmitFailedEvent(t *testing.T) {
 
 	sup.Stop(context.Background())
 
-	crashed := 0
-	failed := 0
+	var crashed []Event
+	var failed []Event
 	for len(events) > 0 {
 		evt := <-events
 		if evt.Service != "api" {
@@ -269,20 +330,30 @@ func TestSupervisorStartFailuresEmitFailedEvent(t *testing.T) {
 		}
 		switch evt.Type {
 		case EventTypeCrashed:
-			crashed++
+			crashed = append(crashed, evt)
 		case EventTypeFailed:
-			failed++
+			failed = append(failed, evt)
 			if !errors.Is(evt.Err, inst2Err) {
 				t.Fatalf("failed event should carry final start error; got %v want %v", evt.Err, inst2Err)
 			}
 		}
 	}
 
-	if crashed != 2 {
-		t.Fatalf("expected two crashed events, got %d", crashed)
+	if len(crashed) != 2 {
+		t.Fatalf("expected two crashed events, got %d", len(crashed))
 	}
-	if failed != 1 {
-		t.Fatalf("expected one failed event, got %d", failed)
+	if crashed[0].Attempt != 1 || crashed[0].Reason != ReasonStartFailure {
+		t.Fatalf("first crash metadata mismatch: %+v", crashed[0])
+	}
+	if crashed[1].Attempt != 2 || crashed[1].Reason != ReasonStartFailure {
+		t.Fatalf("second crash metadata mismatch: %+v", crashed[1])
+	}
+
+	if len(failed) != 1 {
+		t.Fatalf("expected one failed event, got %d", len(failed))
+	}
+	if failed[0].Attempt != 2 || failed[0].Reason != ReasonRetriesExhaust {
+		t.Fatalf("failed event metadata mismatch: %+v", failed[0])
 	}
 }
 
