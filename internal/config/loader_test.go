@@ -164,6 +164,55 @@ services:
 	}
 }
 
+func TestLoadServiceOverridesProbeType(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+defaults:
+  health:
+    interval: 3s
+    http:
+      url: http://localhost:8080/health
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:5432
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	svc := doc.Services["api"]
+	if svc == nil {
+		t.Fatalf("service api missing")
+	}
+	if svc.Health == nil {
+		t.Fatalf("health probe not loaded")
+	}
+	if svc.Health.HTTP != nil {
+		t.Fatalf("unexpected http probe inherited from defaults")
+	}
+	if svc.Health.TCP == nil {
+		t.Fatalf("tcp probe not applied from service override")
+	}
+	if got, want := svc.Health.TCP.Address, "localhost:5432"; got != want {
+		t.Fatalf("tcp address mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Health.Interval.Duration, 3*time.Second; got != want {
+		t.Fatalf("interval default mismatch: got %v want %v", got, want)
+	}
+}
+
 func TestLoadMultipleProbes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")

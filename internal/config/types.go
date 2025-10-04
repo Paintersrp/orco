@@ -274,19 +274,22 @@ func (p *ProbeSpec) ApplyDefaults(defaults *ProbeSpec) {
 	if defaults == nil {
 		return
 	}
-	if p.HTTP == nil && defaults.HTTP != nil {
-		p.HTTP = &HTTPProbeSpec{
-			URL:          defaults.HTTP.URL,
-			ExpectStatus: append([]int(nil), defaults.HTTP.ExpectStatus...),
+	hasType := p.HTTP != nil || p.TCP != nil || p.Command != nil
+	if !hasType {
+		if p.HTTP == nil && defaults.HTTP != nil {
+			p.HTTP = &HTTPProbeSpec{
+				URL:          defaults.HTTP.URL,
+				ExpectStatus: append([]int(nil), defaults.HTTP.ExpectStatus...),
+			}
 		}
-	}
-	if p.TCP == nil && defaults.TCP != nil {
-		p.TCP = &TCPProbeSpec{Address: defaults.TCP.Address}
-	}
-	if p.Command == nil && defaults.Command != nil {
-		p.Command = &CommandProbe{
-			Command: append([]string(nil), defaults.Command.Command...),
-			Timeout: defaults.Command.Timeout,
+		if p.TCP == nil && defaults.TCP != nil {
+			p.TCP = &TCPProbeSpec{Address: defaults.TCP.Address}
+		}
+		if p.Command == nil && defaults.Command != nil {
+			p.Command = &CommandProbe{
+				Command: append([]string(nil), defaults.Command.Command...),
+				Timeout: defaults.Command.Timeout,
+			}
 		}
 	}
 	if p.GracePeriod.Duration == 0 {
