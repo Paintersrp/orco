@@ -179,6 +179,8 @@ orco graph [--dot]
 orco apply
 ```
 
+Use `--since` to restrict streaming to recent activity, for example `orco logs --since 10m` only emits log records from the last ten minutes.
+
 Command behavior emphasizes descriptive errors, for example: `api blocked: dependency db not Ready (timeout 60s, probe failing tcp connect)`.
 
 ## Comparison
