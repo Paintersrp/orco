@@ -76,3 +76,66 @@ services:
 		t.Fatalf("stderr does not mention stack path: %q", got)
 	}
 }
+
+func TestConfigLintDockerRequiresImage(t *testing.T) {
+	dir := t.TempDir()
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	path := filepath.Join(dir, "stack.yaml")
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	cmd := NewRootCmd()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"config", "lint", "--file", path})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	if got := stderr.String(); !strings.Contains(got, "services.api.image") {
+		t.Fatalf("stderr does not mention missing image: %q", got)
+	}
+}
+
+func TestConfigLintProcessRequiresCommand(t *testing.T) {
+	dir := t.TempDir()
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  worker:
+    runtime: process
+`)
+	path := filepath.Join(dir, "stack.yaml")
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	cmd := NewRootCmd()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"config", "lint", "--file", path})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	if got := stderr.String(); !strings.Contains(got, "services.worker.command") {
+		t.Fatalf("stderr does not mention missing command: %q", got)
+	}
+}
