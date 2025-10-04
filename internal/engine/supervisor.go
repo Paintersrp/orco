@@ -212,6 +212,7 @@ func (s *supervisor) run() {
 
 			sendEvent(s.events, s.name, EventTypeCrashed, "start failed", err)
 			if !s.allowRestart(restarts) {
+				sendEvent(s.events, s.name, EventTypeFailed, "service failed", err)
 				s.deliverStarted(err)
 				s.deliverInitial(err)
 				s.setRunErr(err)
@@ -246,6 +247,7 @@ func (s *supervisor) run() {
 
 		sendEvent(s.events, s.name, EventTypeCrashed, "instance crashed", instErr)
 		if !s.allowRestart(restarts) {
+			sendEvent(s.events, s.name, EventTypeFailed, "service failed", instErr)
 			if !ready {
 				s.deliverInitial(instErr)
 			}
