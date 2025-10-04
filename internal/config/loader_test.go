@@ -114,6 +114,56 @@ services:
 	}
 }
 
+func TestLoadServiceOverridesTimingInheritsDefaultProbe(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+defaults:
+  health:
+    interval: 2s
+    timeout: 1s
+    http:
+      url: http://localhost:8080/health
+      expectStatus: [200, 204]
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    health:
+      timeout: 5s
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	svc := doc.Services["api"]
+	if svc == nil {
+		t.Fatalf("service api missing")
+	}
+	if svc.Health == nil {
+		t.Fatalf("health probe not loaded")
+	}
+	if svc.Health.HTTP == nil {
+		t.Fatalf("http probe not inherited from defaults")
+	}
+	if got, want := svc.Health.HTTP.URL, "http://localhost:8080/health"; got != want {
+		t.Fatalf("http url mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Health.HTTP.ExpectStatus, []int{200, 204}; !equalIntSlices(got, want) {
+		t.Fatalf("http expectStatus mismatch: got %v want %v", got, want)
+	}
+	if got, want := svc.Health.Timeout.Duration, 5*time.Second; got != want {
+		t.Fatalf("timeout override mismatch: got %v want %v", got, want)
+	}
+}
+
 func TestLoadMultipleProbes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")
@@ -170,4 +220,16 @@ services:
 	if !strings.Contains(err.Error(), "expected host:container") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func equalIntSlices(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
