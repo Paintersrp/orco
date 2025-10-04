@@ -175,13 +175,27 @@ func (i *dockerInstance) startWaiter() {
 	go func() {
 		statusCh, errCh := i.cli.ContainerWait(context.Background(), i.containerID, container.WaitConditionNextExit)
 		var outcome waitOutcome
-		select {
-		case err := <-errCh:
-			if err != nil {
-				outcome.err = err
+		for statusCh != nil || errCh != nil {
+			select {
+			case err, ok := <-errCh:
+				if !ok {
+					errCh = nil
+					continue
+				}
+				if err != nil {
+					outcome.err = err
+					statusCh = nil
+					errCh = nil
+				}
+			case resp, ok := <-statusCh:
+				if !ok {
+					statusCh = nil
+					continue
+				}
+				outcome.status = resp
+				statusCh = nil
+				errCh = nil
 			}
-		case resp := <-statusCh:
-			outcome.status = resp
 		}
 		i.setWaitOutcome(outcome)
 	}()
@@ -409,11 +423,14 @@ func waitOutcomeError(outcome waitOutcome) error {
 	if outcome.err != nil {
 		return outcome.err
 	}
+	if outcome.status.Error != nil {
+		if outcome.status.StatusCode != 0 {
+			return fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message)
+		}
+		return errors.New(outcome.status.Error.Message)
+	}
 	if outcome.status.StatusCode != 0 {
 		return fmt.Errorf("container exited with status %d", outcome.status.StatusCode)
-	}
-	if outcome.status.Error != nil {
-		return errors.New(outcome.status.Error.Message)
 	}
 	return errors.New("container exited before ready")
 }
@@ -423,6 +440,9 @@ func waitOutcomeExitError(outcome waitOutcome) error {
 		return outcome.err
 	}
 	if outcome.status.Error != nil {
+		if outcome.status.StatusCode != 0 {
+			return fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message)
+		}
 		return errors.New(outcome.status.Error.Message)
 	}
 	if outcome.status.StatusCode != 0 {
