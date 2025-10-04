@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -270,6 +271,15 @@ func validatePort(spec string) error {
 	}
 	if strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		return fmt.Errorf("invalid port mapping %q (expected host:container or host:container/proto)", spec)
+	}
+	for _, segment := range []string{parts[0], parts[1]} {
+		port, err := strconv.Atoi(segment)
+		if err != nil {
+			return fmt.Errorf("invalid port mapping %q (port numbers must be numeric in range 1-65535)", spec)
+		}
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid port mapping %q (port numbers must be numeric in range 1-65535)", spec)
+		}
 	}
 	if proto != "" {
 		protoLower := strings.ToLower(proto)

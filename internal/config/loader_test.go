@@ -344,6 +344,62 @@ services:
 	}
 }
 
+func TestLoadNonNumericPort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    image: test
+    runtime: docker
+    ports: ["abc:8080"]
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "port numbers must be numeric") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadOutOfRangePort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    image: test
+    runtime: docker
+    ports: ["70000:8080"]
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "port numbers must be numeric") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func equalIntSlices(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
