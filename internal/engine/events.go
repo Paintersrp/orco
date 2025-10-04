@@ -32,9 +32,25 @@ type Event struct {
 	Level     string
 	Source    string
 	Err       error
+	Attempt   int
+	Reason    string
 }
 
-func sendEvent(events chan<- Event, service string, t EventType, message string, err error) {
+const (
+	ReasonInitialStart   = "initial_start"
+	ReasonRestart        = "restart"
+	ReasonStartFailure   = "start_failure"
+	ReasonInstanceCrash  = "instance_crash"
+	ReasonRetriesExhaust = "retries_exhausted"
+	ReasonLogStreamError = "log_stream_error"
+	ReasonProbeReady     = "probe_ready"
+	ReasonProbeUnready   = "probe_unready"
+	ReasonSupervisorStop = "supervisor_stop"
+	ReasonStopFailed     = "stop_failed"
+	ReasonShutdown       = "shutdown"
+)
+
+func sendEvent(events chan<- Event, service string, t EventType, message string, attempt int, reason string, err error) {
 	if events == nil {
 		return
 	}
@@ -47,5 +63,7 @@ func sendEvent(events chan<- Event, service string, t EventType, message string,
 		Level:     "info",
 		Source:    runtime.LogSourceSystem,
 		Err:       err,
+		Attempt:   attempt,
+		Reason:    reason,
 	}
 }

@@ -168,9 +168,9 @@ func (d *Deployment) Stop(ctx context.Context, events chan<- Event) error {
 		var firstErr error
 		for i := len(d.handles) - 1; i >= 0; i-- {
 			handle := d.handles[i]
-			sendEvent(events, handle.name, EventTypeStopping, "stopping service", nil)
+			sendEvent(events, handle.name, EventTypeStopping, "stopping service", 0, ReasonShutdown, nil)
 			if err := handle.supervisor.Stop(ctx); err != nil {
-				sendEvent(events, handle.name, EventTypeError, "stop failed", err)
+				sendEvent(events, handle.name, EventTypeError, "stop failed", 0, ReasonStopFailed, err)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("stop service %s: %w", handle.name, err)
 				}

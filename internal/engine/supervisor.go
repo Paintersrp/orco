@@ -198,7 +198,12 @@ func (s *supervisor) run() {
 			return
 		}
 
-		sendEvent(s.events, s.name, EventTypeStarting, "starting service", nil)
+		attempt := restarts + 1
+		reason := ReasonInitialStart
+		if attempt > 1 {
+			reason = ReasonRestart
+		}
+		sendEvent(s.events, s.name, EventTypeStarting, "starting service", attempt, reason, nil)
 
 		spec := buildStartSpec(s.name, s.service)
 		instance, err := s.runtime.Start(s.ctx, spec)
@@ -210,9 +215,9 @@ func (s *supervisor) run() {
 				return
 			}
 
-			sendEvent(s.events, s.name, EventTypeCrashed, "start failed", err)
+			sendEvent(s.events, s.name, EventTypeCrashed, "start failed", attempt, ReasonStartFailure, err)
 			if !s.allowRestart(restarts) {
-				sendEvent(s.events, s.name, EventTypeFailed, "service failed", err)
+				sendEvent(s.events, s.name, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, err)
 				s.deliverStarted(err)
 				s.deliverInitial(err)
 				s.setRunErr(err)
@@ -231,7 +236,7 @@ func (s *supervisor) run() {
 
 		s.deliverStarted(nil)
 		s.setCurrent(instance)
-		instErr, ready := s.manageInstance(instance)
+		instErr, ready := s.manageInstance(instance, attempt)
 		s.clearCurrent()
 
 		if instErr == nil {
@@ -245,9 +250,9 @@ func (s *supervisor) run() {
 			return
 		}
 
-		sendEvent(s.events, s.name, EventTypeCrashed, "instance crashed", instErr)
+		sendEvent(s.events, s.name, EventTypeCrashed, "instance crashed", attempt, ReasonInstanceCrash, instErr)
 		if !s.allowRestart(restarts) {
-			sendEvent(s.events, s.name, EventTypeFailed, "service failed", instErr)
+			sendEvent(s.events, s.name, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, instErr)
 			if !ready {
 				s.deliverInitial(instErr)
 			}
@@ -309,15 +314,15 @@ func (s *supervisor) sleepBackoff(base *time.Duration) error {
 	return nil
 }
 
-func (s *supervisor) manageInstance(instance runtime.Handle) (error, bool) {
+func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error, bool) {
 	var logWG sync.WaitGroup
 	if instance != nil {
 		logs, err := instance.Logs(s.ctx)
 		if err != nil {
-			sendEvent(s.events, s.name, EventTypeError, "log stream unavailable", err)
+			sendEvent(s.events, s.name, EventTypeError, "log stream unavailable", attempt, ReasonLogStreamError, err)
 		} else if logs != nil {
 			logWG.Add(1)
-			go s.streamLogs(logs, &logWG)
+			go s.streamLogs(logs, &logWG, attempt)
 		}
 	}
 
@@ -354,7 +359,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle) (error, bool) {
 			readyObserved = true
 			s.deliverInitial(nil)
 			if healthCh == nil {
-				sendEvent(s.events, s.name, EventTypeReady, "service ready", nil)
+				sendEvent(s.events, s.name, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			}
 		case state, ok := <-healthCh:
 			if !ok {
@@ -375,7 +380,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle) (error, bool) {
 			case probe.StatusReady:
 				readyObserved = true
 				s.deliverInitial(nil)
-				sendEvent(s.events, s.name, EventTypeReady, "service ready", nil)
+				sendEvent(s.events, s.name, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			case probe.StatusUnready:
 				if !readyObserved {
 					ctx, cancel := failureStopContext()
@@ -387,7 +392,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle) (error, bool) {
 					}
 					return errors.New("service reported unready"), readyObserved
 				}
-				sendEvent(s.events, s.name, EventTypeUnready, "service unready", state.Err)
+				sendEvent(s.events, s.name, EventTypeUnready, "service unready", attempt, ReasonProbeUnready, state.Err)
 				ctx, cancel := failureStopContext()
 				_ = s.stopInstance(instance, ctx)
 				cancel()
@@ -407,7 +412,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle) (error, bool) {
 				stopErr := s.stopInstance(instance, stopCtx)
 				s.setStopErr(stopErr)
 				logWG.Wait()
-				sendEvent(s.events, s.name, EventTypeStopped, "service stopped", nil)
+				sendEvent(s.events, s.name, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
 				return nil, readyObserved
 			}
 			exitErr := err
@@ -430,13 +435,13 @@ func (s *supervisor) manageInstance(instance runtime.Handle) (error, bool) {
 			err := s.stopInstance(instance, stopCtx)
 			s.setStopErr(err)
 			logWG.Wait()
-			sendEvent(s.events, s.name, EventTypeStopped, "service stopped", nil)
+			sendEvent(s.events, s.name, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
 			return nil, readyObserved
 		}
 	}
 }
 
-func (s *supervisor) streamLogs(logs <-chan runtime.LogEntry, wg *sync.WaitGroup) {
+func (s *supervisor) streamLogs(logs <-chan runtime.LogEntry, wg *sync.WaitGroup, attempt int) {
 	defer wg.Done()
 	var dropped int
 	for entry := range logs {
@@ -444,23 +449,23 @@ func (s *supervisor) streamLogs(logs <-chan runtime.LogEntry, wg *sync.WaitGroup
 			continue
 		}
 		if dropped > 0 {
-			if !s.emitDropped(dropped, false) {
+			if !s.emitDropped(dropped, false, attempt) {
 				dropped++
 				continue
 			}
 			dropped = 0
 		}
-		evt := s.normalizeLog(entry)
+		evt := s.normalizeLog(entry, attempt)
 		if !s.emitLog(evt, false) {
 			dropped++
 		}
 	}
 	if dropped > 0 {
-		s.emitDropped(dropped, true)
+		s.emitDropped(dropped, true, attempt)
 	}
 }
 
-func (s *supervisor) normalizeLog(entry runtime.LogEntry) Event {
+func (s *supervisor) normalizeLog(entry runtime.LogEntry, attempt int) Event {
 	level := entry.Level
 	source := entry.Source
 	if source == "" {
@@ -485,6 +490,7 @@ func (s *supervisor) normalizeLog(entry runtime.LogEntry) Event {
 		Message:   entry.Message,
 		Level:     level,
 		Source:    source,
+		Attempt:   attempt,
 	}
 }
 
@@ -508,7 +514,7 @@ func (s *supervisor) emitLog(evt Event, block bool) bool {
 	}
 }
 
-func (s *supervisor) emitDropped(count int, block bool) bool {
+func (s *supervisor) emitDropped(count int, block bool, attempt int) bool {
 	evt := Event{
 		Timestamp: time.Now(),
 		Service:   s.name,
@@ -517,6 +523,7 @@ func (s *supervisor) emitDropped(count int, block bool) bool {
 		Message:   fmt.Sprintf("dropped=%d", count),
 		Level:     "warn",
 		Source:    runtime.LogSourceSystem,
+		Attempt:   attempt,
 	}
 	return s.emitLog(evt, block)
 }
