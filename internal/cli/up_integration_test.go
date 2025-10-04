@@ -27,6 +27,10 @@ func TestUpCommandStartsServicesInDependencyOrder(t *testing.T) {
 stack:
   name: "demo"
   workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
 services:
   db:
     runtime: process
@@ -58,7 +62,7 @@ services:
 	cmd.SetContext(runCtx)
 
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond)
 		cancel()
 	}()
 
@@ -111,6 +115,10 @@ func TestUpCommandStopsDeploymentBeforeExitOnCancel(t *testing.T) {
 stack:
   name: "demo"
   workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
 services:
   api:
     runtime: process
@@ -184,6 +192,10 @@ func TestUpCommandPropagatesRuntimeErrors(t *testing.T) {
 stack:
   name: "demo"
   workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
 services:
   db:
     runtime: process

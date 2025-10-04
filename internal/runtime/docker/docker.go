@@ -206,22 +206,69 @@ func (i *dockerInstance) startHealthMonitor() {
 	}
 	go func() {
 		defer close(i.healthDone)
-		runner := probe.NewRunner(i.svc.Health)
-		readyCh := make(chan error, 1)
-		go func() {
-			defer close(readyCh)
-			readyCh <- runner.Run(i.healthCtx)
-		}()
-		go func() {
-			defer close(i.healthEvents)
-			runner.Watch(i.healthCtx, i.healthEvents)
-		}()
-		if err := <-readyCh; err != nil {
+		prober, err := probe.New(i.svc.Health)
+		if err != nil {
 			i.signalReady(err)
-		} else {
-			i.signalReady(nil)
+			close(i.healthEvents)
+			return
 		}
-		<-i.healthCtx.Done()
+
+		events := probe.Watch(i.healthCtx, prober, i.svc.Health, nil)
+		readyReported := false
+
+		for {
+			select {
+			case <-i.healthCtx.Done():
+				if !readyReported {
+					readyReported = true
+					readyErr := i.healthCtx.Err()
+					if readyErr == nil {
+						readyErr = context.Canceled
+					}
+					i.signalReady(readyErr)
+				}
+				close(i.healthEvents)
+				return
+			case event, ok := <-events:
+				if !ok {
+					if !readyReported {
+						readyReported = true
+						readyErr := i.healthCtx.Err()
+						if readyErr == nil {
+							readyErr = errors.New("probe ended before reporting readiness")
+						}
+						i.signalReady(readyErr)
+					}
+					close(i.healthEvents)
+					return
+				}
+
+				if !readyReported {
+					switch event.Status {
+					case probe.StatusReady:
+						readyReported = true
+						i.signalReady(nil)
+					case probe.StatusUnready:
+						readyErr := event.Err
+						if readyErr == nil && event.Reason != "" {
+							readyErr = errors.New(event.Reason)
+						}
+						if readyErr == nil {
+							readyErr = errors.New("probe reported unready before initial readiness")
+						}
+						readyReported = true
+						i.signalReady(readyErr)
+					}
+				}
+
+				select {
+				case i.healthEvents <- event:
+				case <-i.healthCtx.Done():
+					close(i.healthEvents)
+					return
+				}
+			}
+		}
 	}()
 }
 
