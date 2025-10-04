@@ -57,6 +57,7 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 				retErr = err
 			}
 			cancel()
+			ctx.clearDeployment(deployment)
 		}
 		ui.CloseEvents()
 		ui.Stop()
@@ -73,6 +74,8 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 		return depErr
 	}
 
+	ctx.setDeployment(deployment)
+
 	select {
 	case <-cmd.Context().Done():
 	case <-ui.Done():
@@ -87,11 +90,12 @@ func runUpInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocume
 
 func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
 	events := make(chan engine.Event, 64)
+	trackedEvents := ctx.trackEvents(events, cap(events))
 	var printer sync.WaitGroup
 	printer.Add(1)
 	go func() {
 		defer printer.Done()
-		printEvents(cmd.OutOrStdout(), cmd.ErrOrStderr(), events)
+		printEvents(cmd.OutOrStdout(), cmd.ErrOrStderr(), trackedEvents)
 	}()
 
 	runCtx, runCancel := stdcontext.WithCancel(stdcontext.WithoutCancel(cmd.Context()))
@@ -110,6 +114,7 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 				fmt.Fprintln(cmd.OutOrStdout(), "Services shut down cleanly.")
 			}
 			cancel()
+			ctx.clearDeployment(deployment)
 		}
 		close(events)
 		printer.Wait()
@@ -122,6 +127,8 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 	if depErr != nil {
 		return depErr
 	}
+
+	ctx.setDeployment(deployment)
 
 	fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
 

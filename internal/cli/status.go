@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/Paintersrp/orco/internal/engine"
 )
 
 func newStatusCmd(ctx *context) *cobra.Command {
@@ -18,23 +20,43 @@ func newStatusCmd(ctx *context) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			tracker := ctx.statusTracker()
+			snapshot := tracker.Snapshot()
+
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "SERVICE\tRUNTIME\tREPLICAS\tDEPENDENCIES")
+			fmt.Fprintln(w, "SERVICE\tSTATE\tREADY\tRESTARTS\tAGE\tMESSAGE")
 			for _, name := range doc.File.ServicesSorted() {
-				svc := doc.File.Services[name]
-				deps := "-"
-				if len(svc.DependsOn) > 0 {
-					items := make([]string, len(svc.DependsOn))
-					for i, dep := range svc.DependsOn {
-						require := dep.Require
-						if require == "" {
-							require = "ready"
+				status, ok := snapshot[name]
+				state := formatStatusState(status.State)
+				ready := "-"
+				restarts := 0
+				age := "-"
+				message := "-"
+				if ok {
+					if status.FirstSeen.IsZero() {
+						age = "-"
+					} else {
+						ageDur := time.Since(status.FirstSeen)
+						if ageDur < 0 {
+							ageDur = 0
 						}
-						items[i] = fmt.Sprintf("%s(%s)", dep.Target, require)
+						ageDur = ageDur.Truncate(time.Second)
+						age = ageDur.String()
 					}
-					deps = strings.Join(items, ", ")
+					if status.Ready {
+						ready = "Yes"
+					} else {
+						ready = "No"
+					}
+					restarts = status.Restarts
+					if status.Message != "" {
+						message = status.Message
+					} else {
+						message = "-"
+					}
+					state = formatStatusState(status.State)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", name, svc.Runtime, svc.Replicas, deps)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", name, state, ready, restarts, age, message)
 			}
 			w.Flush()
 			fmt.Fprintf(cmd.OutOrStdout(), "\nStack: %s (version %s)\n", doc.File.Stack.Name, doc.File.Version)
@@ -43,4 +65,15 @@ func newStatusCmd(ctx *context) *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+func formatStatusState(t engine.EventType) string {
+	if t == "" {
+		return "-"
+	}
+	s := string(t)
+	if len(s) <= 1 {
+		return strings.ToUpper(s)
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

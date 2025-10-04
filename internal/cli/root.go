@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -64,6 +65,10 @@ func Execute() {
 type context struct {
 	stackFile    *string
 	orchestrator *engine.Orchestrator
+
+	mu         sync.RWMutex
+	deployment *engine.Deployment
+	tracker    *statusTracker
 }
 
 func (c *context) loadStack() (*cliutil.StackDocument, error) {
@@ -78,4 +83,51 @@ func (c *context) getOrchestrator() *engine.Orchestrator {
 		})
 	}
 	return c.orchestrator
+}
+
+func (c *context) setDeployment(dep *engine.Deployment) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deployment = dep
+}
+
+func (c *context) clearDeployment(dep *engine.Deployment) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.deployment == dep {
+		c.deployment = nil
+	}
+}
+
+func (c *context) currentDeployment() *engine.Deployment {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.deployment
+}
+
+func (c *context) statusTracker() *statusTracker {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tracker == nil {
+		c.tracker = newStatusTracker()
+	}
+	return c.tracker
+}
+
+func (c *context) trackEvents(events <-chan engine.Event, buffer int) <-chan engine.Event {
+	tracker := c.statusTracker()
+	var out chan engine.Event
+	if buffer > 0 {
+		out = make(chan engine.Event, buffer)
+	} else {
+		out = make(chan engine.Event)
+	}
+	go func() {
+		defer close(out)
+		for evt := range events {
+			tracker.Apply(evt)
+			out <- evt
+		}
+	}()
+	return out
 }
