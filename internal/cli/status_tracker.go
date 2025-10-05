@@ -19,8 +19,9 @@ type serviceStatus struct {
 	restarts  int
 	message   string
 
-	replicaCount int
-	replicas     map[int]*replicaStatus
+	replicaCount  int
+	replicas      map[int]*replicaStatus
+	readyReplicas int
 }
 
 type replicaStatus struct {
@@ -106,10 +107,13 @@ func (t *statusTracker) Apply(evt engine.Event) {
 
 	totalRestarts := 0
 	ready := state.replicaCount > 0
+	readyCount := 0
 	for i := 0; i < state.replicaCount; i++ {
 		rep := state.replicas[i]
 		if rep == nil || !rep.ready {
 			ready = false
+		} else {
+			readyCount++
 		}
 		if rep != nil {
 			totalRestarts += rep.restarts
@@ -120,6 +124,7 @@ func (t *statusTracker) Apply(evt engine.Event) {
 	}
 	state.ready = ready
 	state.restarts = totalRestarts
+	state.readyReplicas = readyCount
 	if state.state == engine.EventTypeReady && !state.ready {
 		state.state = engine.EventTypeStarting
 	}
@@ -127,14 +132,15 @@ func (t *statusTracker) Apply(evt engine.Event) {
 
 // ServiceStatus captures a snapshot of a service state for presentation.
 type ServiceStatus struct {
-	Name      string
-	FirstSeen time.Time
-	LastEvent time.Time
-	State     engine.EventType
-	Ready     bool
-	Restarts  int
-	Replicas  int
-	Message   string
+	Name          string
+	FirstSeen     time.Time
+	LastEvent     time.Time
+	State         engine.EventType
+	Ready         bool
+	Restarts      int
+	Replicas      int
+	ReadyReplicas int
+	Message       string
 }
 
 // Snapshot returns a map keyed by service name containing copies of the tracked state.
@@ -145,14 +151,15 @@ func (t *statusTracker) Snapshot() map[string]ServiceStatus {
 	snapshot := make(map[string]ServiceStatus, len(t.services))
 	for name, state := range t.services {
 		snapshot[name] = ServiceStatus{
-			Name:      state.name,
-			FirstSeen: state.firstSeen,
-			LastEvent: state.lastEvent,
-			State:     state.state,
-			Ready:     state.ready,
-			Restarts:  state.restarts,
-			Replicas:  state.replicaCount,
-			Message:   state.message,
+			Name:          state.name,
+			FirstSeen:     state.firstSeen,
+			LastEvent:     state.lastEvent,
+			State:         state.state,
+			Ready:         state.ready,
+			Restarts:      state.restarts,
+			Replicas:      state.replicaCount,
+			ReadyReplicas: state.readyReplicas,
+			Message:       state.message,
 		}
 	}
 	return snapshot

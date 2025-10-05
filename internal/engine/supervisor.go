@@ -28,6 +28,11 @@ type restartPolicy struct {
 	factor     float64
 }
 
+type restartRequest struct {
+	ctx  context.Context
+	done chan error
+}
+
 // supervisor is responsible for managing the lifecycle of a single service
 // instance. It runs the instance in a dedicated goroutine, observes readiness
 // transitions and initiates restarts based on the configured restart policy.
@@ -43,6 +48,8 @@ type supervisor struct {
 
 	jitter func(time.Duration) time.Duration
 	sleep  func(context.Context, time.Duration) error
+
+	restartCh chan *restartRequest
 
 	readyOnce sync.Once
 	readyCh   chan error
@@ -77,6 +84,7 @@ func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runt
 		existsCh:  make(chan error, 1),
 		startedCh: make(chan error, 1),
 		done:      make(chan struct{}),
+		restartCh: make(chan *restartRequest),
 	}
 
 	sup.policy = deriveRestartPolicy(svc)
@@ -176,6 +184,23 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
+func (s *supervisor) finishRestart(req *restartRequest, err error) {
+	if req == nil {
+		return
+	}
+	if req.ctx != nil && err == nil {
+		select {
+		case <-req.ctx.Done():
+			err = req.ctx.Err()
+		default:
+		}
+	}
+	select {
+	case req.done <- err:
+	default:
+	}
+}
+
 func (s *supervisor) Start(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -184,16 +209,70 @@ func (s *supervisor) Start(ctx context.Context) {
 	go s.run()
 }
 
+func (s *supervisor) Restart(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req := &restartRequest{ctx: ctx, done: make(chan error, 1)}
+
+	select {
+	case <-s.done:
+		return errors.New("supervisor not running")
+	default:
+	}
+
+	select {
+	case s.restartCh <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return errors.New("supervisor not running")
+	}
+
+	select {
+	case err := <-req.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		select {
+		case err := <-req.done:
+			return err
+		default:
+			return errors.New("supervisor not running")
+		}
+	}
+}
+
 func (s *supervisor) run() {
 	defer close(s.done)
 
 	s.deliverExists(nil)
+
+	var pending *restartRequest
+	defer func() {
+		if pending != nil {
+			s.finishRestart(pending, errors.New("supervisor stopped"))
+		}
+		for {
+			select {
+			case req := <-s.restartCh:
+				s.finishRestart(req, errors.New("supervisor stopped"))
+			default:
+				return
+			}
+		}
+	}()
 
 	restarts := 0
 	backoffBase := s.policy.min
 
 	for {
 		if err := s.ctx.Err(); err != nil {
+			if pending != nil {
+				s.finishRestart(pending, err)
+				pending = nil
+			}
 			s.deliverStarted(err)
 			s.deliverInitial(err)
 			s.setRunErr(err)
@@ -202,7 +281,7 @@ func (s *supervisor) run() {
 
 		attempt := restarts + 1
 		reason := ReasonInitialStart
-		if attempt > 1 {
+		if attempt > 1 || pending != nil {
 			reason = ReasonRestart
 		}
 		sendEvent(s.events, s.name, s.replica, EventTypeStarting, "starting service", attempt, reason, nil)
@@ -211,9 +290,16 @@ func (s *supervisor) run() {
 		instance, err := s.runtime.Start(s.ctx, spec)
 		if err != nil {
 			if s.ctx.Err() != nil {
-				s.deliverStarted(s.ctx.Err())
-				s.deliverInitial(s.ctx.Err())
-				s.setRunErr(s.ctx.Err())
+				err = s.ctx.Err()
+			}
+			if pending != nil {
+				s.finishRestart(pending, err)
+				pending = nil
+			}
+			if s.ctx.Err() != nil {
+				s.deliverStarted(err)
+				s.deliverInitial(err)
+				s.setRunErr(err)
 				return
 			}
 
@@ -227,29 +313,51 @@ func (s *supervisor) run() {
 			}
 
 			restarts++
-			if err := s.sleepBackoff(&backoffBase); err != nil {
-				s.deliverStarted(err)
-				s.deliverInitial(err)
-				s.setRunErr(err)
-				return
+			if pending == nil {
+				if err := s.sleepBackoff(&backoffBase); err != nil {
+					s.deliverStarted(err)
+					s.deliverInitial(err)
+					s.setRunErr(err)
+					return
+				}
 			}
 			continue
 		}
 
 		s.deliverStarted(nil)
 		s.setCurrent(instance)
-		instErr, ready := s.manageInstance(instance, attempt)
+		instErr, ready, next := s.manageInstance(instance, attempt, pending)
 		s.clearCurrent()
 
+		if next != nil {
+			pending = next
+			restarts++
+			backoffBase = s.policy.min
+			continue
+		}
+
 		if instErr == nil {
+			if pending != nil {
+				s.finishRestart(pending, nil)
+				pending = nil
+			}
 			s.setRunErr(nil)
 			return
 		}
 
 		if errors.Is(instErr, context.Canceled) && s.ctx.Err() != nil {
+			if pending != nil {
+				s.finishRestart(pending, s.ctx.Err())
+				pending = nil
+			}
 			s.deliverInitial(s.ctx.Err())
 			s.setRunErr(s.ctx.Err())
 			return
+		}
+
+		if pending != nil {
+			s.finishRestart(pending, instErr)
+			pending = nil
 		}
 
 		sendEvent(s.events, s.name, s.replica, EventTypeCrashed, "instance crashed", attempt, ReasonInstanceCrash, instErr)
@@ -263,11 +371,13 @@ func (s *supervisor) run() {
 		}
 
 		restarts++
-		if err := s.sleepBackoff(&backoffBase); err != nil {
-			s.deliverStarted(err)
-			s.deliverInitial(err)
-			s.setRunErr(err)
-			return
+		if pending == nil {
+			if err := s.sleepBackoff(&backoffBase); err != nil {
+				s.deliverStarted(err)
+				s.deliverInitial(err)
+				s.setRunErr(err)
+				return
+			}
 		}
 	}
 }
@@ -316,7 +426,7 @@ func (s *supervisor) sleepBackoff(base *time.Duration) error {
 	return nil
 }
 
-func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error, bool) {
+func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pending *restartRequest) (error, bool, *restartRequest) {
 	var logWG sync.WaitGroup
 	if instance != nil {
 		logs, err := instance.Logs(s.ctx)
@@ -343,23 +453,55 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 	}()
 	defer waitCancel()
 
+	pendingRestart := pending
+	var manualRestart *restartRequest
+
 	for {
 		select {
+		case req := <-s.restartCh:
+			if manualRestart != nil || pendingRestart != nil {
+				s.finishRestart(req, errors.New("restart already in progress"))
+				continue
+			}
+			stopCtx := req.ctx
+			var cancel context.CancelFunc
+			if stopCtx == nil {
+				stopCtx, cancel = failureStopContext()
+			}
+			sendEvent(s.events, s.name, s.replica, EventTypeStopping, "stopping for restart", attempt, ReasonRestart, nil)
+			err := s.stopInstance(instance, stopCtx)
+			if cancel != nil {
+				cancel()
+			}
+			if err != nil {
+				s.finishRestart(req, err)
+				continue
+			}
+			manualRestart = req
+			waitCancel()
 		case err := <-readyCh:
 			readyCh = nil
 			if err != nil {
+				if pendingRestart != nil {
+					s.finishRestart(pendingRestart, err)
+					pendingRestart = nil
+				}
 				if s.ctx.Err() != nil && errors.Is(err, context.Canceled) {
 					logWG.Wait()
-					return s.ctx.Err(), readyObserved
+					return s.ctx.Err(), readyObserved, nil
 				}
 				ctx, cancel := failureStopContext()
 				_ = s.stopInstance(instance, ctx)
 				cancel()
 				logWG.Wait()
-				return err, readyObserved
+				return err, readyObserved, nil
 			}
 			readyObserved = true
 			s.deliverInitial(nil)
+			if pendingRestart != nil {
+				s.finishRestart(pendingRestart, nil)
+				pendingRestart = nil
+			}
 			if healthCh == nil {
 				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			}
@@ -370,11 +512,15 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 					continue
 				}
 				if readyObserved {
+					if pendingRestart != nil {
+						s.finishRestart(pendingRestart, errors.New("health channel closed"))
+						pendingRestart = nil
+					}
 					ctx, cancel := failureStopContext()
 					_ = s.stopInstance(instance, ctx)
 					cancel()
 					logWG.Wait()
-					return errors.New("health channel closed"), readyObserved
+					return errors.New("health channel closed"), readyObserved, nil
 				}
 				continue
 			}
@@ -382,31 +528,47 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 			case probe.StatusReady:
 				readyObserved = true
 				s.deliverInitial(nil)
+				if pendingRestart != nil {
+					s.finishRestart(pendingRestart, nil)
+					pendingRestart = nil
+				}
 				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			case probe.StatusUnready:
 				if !readyObserved {
+					if pendingRestart != nil {
+						err := state.Err
+						if err == nil {
+							err = errors.New("service reported unready")
+						}
+						s.finishRestart(pendingRestart, err)
+						pendingRestart = nil
+					}
 					ctx, cancel := failureStopContext()
 					_ = s.stopInstance(instance, ctx)
 					cancel()
 					logWG.Wait()
 					if state.Err != nil {
-						return state.Err, readyObserved
+						return state.Err, readyObserved, nil
 					}
-					return errors.New("service reported unready"), readyObserved
+					return errors.New("service reported unready"), readyObserved, nil
 				}
 				sendEvent(s.events, s.name, s.replica, EventTypeUnready, "service unready", attempt, ReasonProbeUnready, state.Err)
 				ctx, cancel := failureStopContext()
 				_ = s.stopInstance(instance, ctx)
 				cancel()
-				logWG.Wait()
-				if state.Err != nil {
-					return state.Err, readyObserved
-				}
-				return errors.New("service reported unready"), readyObserved
 			}
 		case err := <-waitCh:
 			waitCh = nil
+			if manualRestart != nil {
+				logWG.Wait()
+				sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped for restart", attempt, ReasonRestart, nil)
+				return nil, readyObserved, manualRestart
+			}
 			if s.ctx.Err() != nil {
+				if pendingRestart != nil {
+					s.finishRestart(pendingRestart, s.ctx.Err())
+					pendingRestart = nil
+				}
 				if !readyObserved {
 					s.deliverInitial(s.ctx.Err())
 				}
@@ -415,11 +577,15 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 				s.setStopErr(stopErr)
 				logWG.Wait()
 				sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
-				return nil, readyObserved
+				return nil, readyObserved, nil
 			}
 			exitErr := err
 			if exitErr == nil {
 				exitErr = fmt.Errorf("service %s exited unexpectedly", s.name)
+			}
+			if pendingRestart != nil {
+				s.finishRestart(pendingRestart, exitErr)
+				pendingRestart = nil
 			}
 			if !readyObserved {
 				s.deliverInitial(exitErr)
@@ -428,8 +594,12 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 			_ = s.stopInstance(instance, ctx)
 			cancel()
 			logWG.Wait()
-			return exitErr, readyObserved
+			return exitErr, readyObserved, nil
 		case <-s.ctx.Done():
+			if pendingRestart != nil {
+				s.finishRestart(pendingRestart, s.ctx.Err())
+				pendingRestart = nil
+			}
 			if !readyObserved {
 				s.deliverInitial(s.ctx.Err())
 			}
@@ -438,7 +608,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 			s.setStopErr(err)
 			logWG.Wait()
 			sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
-			return nil, readyObserved
+			return nil, readyObserved, nil
 		}
 	}
 }
