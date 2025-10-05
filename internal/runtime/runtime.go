@@ -72,6 +72,12 @@ type StartSpec struct {
 	// Docker CLI notation (e.g. "127.0.0.1:8080:80/tcp").
 	Ports []string
 
+	// Volumes enumerates bind mounts requested for the instance. Each
+	// volume represents a host path bound into the container at the
+	// specified target. Modes map directly to the Docker bind options
+	// string (e.g. "ro", "rw,cached").
+	Volumes []Volume
+
 	// Workdir configures the working directory for the launched process.
 	Workdir string
 
@@ -82,6 +88,19 @@ type StartSpec struct {
 	// primarily used by existing runtimes that need access to additional
 	// configuration that has not yet been promoted onto StartSpec.
 	Service *stack.Service
+}
+
+// Volume describes a bind mount exposed to the launched instance.
+type Volume struct {
+	// Source is the absolute host path for the bind mount.
+	Source string
+
+	// Target is the absolute container path where the source is mounted.
+	Target string
+
+	// Mode carries the bind options string passed to the runtime. An empty
+	// value requests Docker's default behaviour (read-write).
+	Mode string
 }
 
 // LogEntry represents a single line of log output emitted by an instance.

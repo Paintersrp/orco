@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/docker/docker/volume/mounts"
 	"github.com/docker/go-connections/nat"
 
 	"github.com/Paintersrp/orco/internal/probe"
@@ -563,5 +564,19 @@ func buildConfigs(spec runtime.StartSpec) (*container.Config, *container.HostCon
 		config.WorkingDir = spec.Workdir
 	}
 	host := &container.HostConfig{PortBindings: bindings}
+	if len(spec.Volumes) > 0 {
+		parser := mounts.NewParser()
+		host.Binds = make([]string, 0, len(spec.Volumes))
+		for _, volume := range spec.Volumes {
+			bindSpec := volume.Source + ":" + volume.Target
+			if volume.Mode != "" {
+				bindSpec += ":" + volume.Mode
+			}
+			if _, err := parser.ParseMountRaw(bindSpec, ""); err != nil {
+				return nil, nil, fmt.Errorf("parse volume %q: %w", bindSpec, err)
+			}
+			host.Binds = append(host.Binds, bindSpec)
+		}
+	}
 	return config, host, nil
 }
