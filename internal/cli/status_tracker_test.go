@@ -107,3 +107,32 @@ func TestStatusTrackerAggregatesReplicaReadiness(t *testing.T) {
 		t.Fatalf("expected message to reference replica, got %q", snap.Message)
 	}
 }
+
+func TestStatusTrackerRedactsSecretsInMessages(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStatusTracker()
+	base := time.Now()
+
+	tracker.Apply(engine.Event{
+		Service:   "api",
+		Replica:   0,
+		Type:      engine.EventTypeFailed,
+		Message:   "unable to fetch ${API_TOKEN} AWS_SECRET_ACCESS_KEY=shhh",
+		Timestamp: base,
+	})
+
+	snap := tracker.Snapshot()["api"]
+	if strings.Contains(snap.Message, "${API_TOKEN}") {
+		t.Fatalf("expected template placeholder to be redacted, got %q", snap.Message)
+	}
+	if !strings.Contains(snap.Message, "${[redacted]}") {
+		t.Fatalf("expected template placeholder marker, got %q", snap.Message)
+	}
+	if strings.Contains(snap.Message, "shhh") {
+		t.Fatalf("expected secret value to be redacted, got %q", snap.Message)
+	}
+	if !strings.Contains(snap.Message, "AWS_SECRET_ACCESS_KEY=[redacted]") {
+		t.Fatalf("expected known secret key redacted, got %q", snap.Message)
+	}
+}
