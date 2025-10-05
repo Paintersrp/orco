@@ -36,6 +36,15 @@ func WithMaxLogs(n int) Option {
 	}
 }
 
+// WithScreen configures the application to render using the provided screen.
+func WithScreen(screen tcell.Screen) Option {
+	return func(u *UI) {
+		if screen != nil {
+			u.app = u.app.SetScreen(screen)
+		}
+	}
+}
+
 // UI coordinates the interactive status interface backed by tview.
 type UI struct {
 	app    *tview.Application
