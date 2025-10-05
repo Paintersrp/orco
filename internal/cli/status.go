@@ -12,6 +12,8 @@ import (
 )
 
 func newStatusCmd(ctx *context) *cobra.Command {
+	var historyLimit int
+
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Display a summary of services defined in the stack",
@@ -23,9 +25,11 @@ func newStatusCmd(ctx *context) *cobra.Command {
 			tracker := ctx.statusTracker()
 			snapshot := tracker.Snapshot()
 
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+			out := cmd.OutOrStdout()
+			w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "SERVICE\tSTATE\tREADY\tREPL\tRESTARTS\tAGE\tMESSAGE")
-			for _, name := range doc.File.ServicesSorted() {
+			orderedServices := doc.File.ServicesSorted()
+			for _, name := range orderedServices {
 				status, ok := snapshot[name]
 				state := formatStatusState(status.State)
 				ready := "-"
@@ -70,11 +74,33 @@ func newStatusCmd(ctx *context) *cobra.Command {
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", name, state, ready, replicas, restarts, age, message)
 			}
 			w.Flush()
-			fmt.Fprintf(cmd.OutOrStdout(), "\nStack: %s (version %s)\n", doc.File.Stack.Name, doc.File.Version)
-			fmt.Fprintf(cmd.OutOrStdout(), "Validated at %s\n", time.Now().Format(time.RFC3339))
+			fmt.Fprintf(out, "\nStack: %s (version %s)\n", doc.File.Stack.Name, doc.File.Version)
+			fmt.Fprintf(out, "Validated at %s\n", time.Now().Format(time.RFC3339))
+
+			if historyLimit > 0 {
+				for _, name := range orderedServices {
+					history := tracker.History(name, historyLimit)
+					if len(history) == 0 {
+						continue
+					}
+					fmt.Fprintf(out, "\n%s history:\n", name)
+					for _, entry := range history {
+						reason := entry.Reason
+						if reason == "" {
+							reason = "-"
+						}
+						fmt.Fprintf(out, "  %s  %-10s  %-20s  %s\n",
+							entry.Timestamp.Format(time.RFC3339),
+							formatStatusState(entry.Type),
+							reason,
+							entry.Message)
+					}
+				}
+			}
 			return nil
 		},
 	}
+	cmd.Flags().IntVar(&historyLimit, "history", 0, "Show last N transitions per service")
 	return cmd
 }
 

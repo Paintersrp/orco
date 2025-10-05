@@ -79,14 +79,14 @@ services:
 	}
 }
 
-func runStatusCommand(t *testing.T, ctx *context) string {
+func runStatusCommand(t *testing.T, ctx *context, args ...string) string {
 	t.Helper()
 	cmd := newStatusCmd(ctx)
 	cmd.SetContext(stdcontext.Background())
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs(nil)
+	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("status command failed: %v\nstderr: %s", err, stderr.String())
 	}
@@ -102,4 +102,55 @@ func findServiceLine(output, service string) string {
 		}
 	}
 	return ""
+}
+
+func TestStatusCommandHistoryFlag(t *testing.T) {
+	t.Parallel()
+
+	stackPath := writeStackFile(t, `version: "0.1"
+stack:
+  name: "demo"
+  workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
+services:
+  api:
+    runtime: process
+    command: ["sleep", "0"]
+`)
+
+	ctx := &context{stackFile: &stackPath}
+	ctx.tracker = newStatusTracker(WithHistorySize(5))
+	tracker := ctx.statusTracker()
+
+	base := time.Now().Add(-2 * time.Minute)
+	start := base
+	ready := base.Add(10 * time.Second)
+	tracker.Apply(engine.Event{Service: "api", Type: engine.EventTypeStarting, Message: "launch", Timestamp: start, Reason: engine.ReasonInitialStart})
+	tracker.Apply(engine.Event{Service: "api", Type: engine.EventTypeReady, Message: "online", Timestamp: ready, Reason: engine.ReasonProbeReady})
+
+	output := runStatusCommand(t, ctx, "--history", "5")
+	if !strings.Contains(output, "api history:") {
+		t.Fatalf("expected history section for api, got: %s", output)
+	}
+	if strings.Contains(output, "db history:") {
+		t.Fatalf("did not expect history for undefined service, got: %s", output)
+	}
+	if !strings.Contains(output, start.Format(time.RFC3339)) {
+		t.Fatalf("expected starting timestamp in history output: %s", output)
+	}
+	if !strings.Contains(output, ready.Format(time.RFC3339)) {
+		t.Fatalf("expected ready timestamp in history output: %s", output)
+	}
+	if !strings.Contains(output, engine.ReasonInitialStart) {
+		t.Fatalf("expected reason in history output: %s", output)
+	}
+	if !strings.Contains(output, engine.ReasonProbeReady) {
+		t.Fatalf("expected second reason in history output: %s", output)
+	}
+	if !strings.Contains(output, "launch") || !strings.Contains(output, "online") {
+		t.Fatalf("expected messages in history output: %s", output)
+	}
 }

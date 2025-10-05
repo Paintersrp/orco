@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -132,7 +133,21 @@ func (c *context) statusTracker() *statusTracker {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.tracker == nil {
-		c.tracker = newStatusTracker()
+		var opts []StatusTrackerOption
+		if value := os.Getenv("ORCO_STATUS_HISTORY"); value != "" {
+			if size, err := strconv.Atoi(value); err == nil {
+				opts = append(opts, WithHistorySize(size))
+			}
+		}
+		if value := os.Getenv("ORCO_STATUS_JOURNAL"); value != "" {
+			if enabled, err := strconv.ParseBool(value); err == nil && enabled {
+				opts = append(opts, WithJournalEnabled(true))
+				if path := os.Getenv("ORCO_STATUS_JOURNAL_PATH"); path != "" {
+					opts = append(opts, WithJournalPath(path))
+				}
+			}
+		}
+		c.tracker = newStatusTracker(opts...)
 	}
 	return c.tracker
 }
