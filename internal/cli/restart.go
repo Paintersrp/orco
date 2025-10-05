@@ -27,7 +27,7 @@ func newRestartCmd(ctx *context) *cobra.Command {
 			if svc.Update != nil && svc.Update.Strategy != "" {
 				strategy = svc.Update.Strategy
 			}
-			if strategy != "rolling" {
+			if strategy != "rolling" && strategy != "canary" {
 				return fmt.Errorf("unsupported update strategy %q for service %s", strategy, svcName)
 			}
 

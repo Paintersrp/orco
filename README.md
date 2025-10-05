@@ -17,6 +17,8 @@ The repository now includes a Go implementation of the Orco CLI. To experiment w
 
 These commands currently validate the stack definition, construct the dependency DAG, and display planning information while the execution engine is developed. Future work will add real runtimes, health gating, and supervisors on top of this foundation.
 
+The `examples/canary-stack.yaml` manifest demonstrates configuring a canary update strategy with optional automatic promotion.
+
 ## Problem statement
 
 Traditional tooling such as `docker-compose` is optimized for "bring up these services" but leaves orchestration concerns to operators. This leads to awkward limitations:
@@ -126,6 +128,7 @@ Key behaviors:
 - `dependsOn.require` controls whether Orco waits for dependencies to start, exist, or reach readiness.
 - Probes support HTTP, TCP, command, and log checks, and an optional `expression` enables simple `OR` combinations.
 - `runtime` can be either `docker` or `process`, enabling mixed workloads.
+- `update.strategy: canary` rolls updates out to a single replica and waits for `orco promote <service>` (or `update.promoteAfter`) before continuing.
 
 ## Engine design
 
@@ -143,7 +146,11 @@ HTTP, TCP, command, and log probes can be mixed per service. Each probe has conf
 
 ### Progressive restarts & rolling updates
 
-Rolling updates update one replica at a time. Parameters such as `maxUnavailable` and `maxSurge` constrain concurrency, ensuring availability while updates proceed. Future versions plan to add canary support for targeted rollouts.
+Rolling updates update one replica at a time. Parameters such as `maxUnavailable` and `maxSurge` constrain concurrency, ensuring availability while updates proceed. Setting `update.strategy: canary` limits the rollout to a single replica until a promotion is triggered, enabling targeted validation before continuing.
+
+### Canary rollouts
+
+When a canary rollout is in progress Orco restarts one replica, waits for it to become healthy, and emits a `Canary` event. You can then run `orco promote <service>` to continue the rollout, or declare `update.promoteAfter` to automatically promote after a soak period (for example `promoteAfter: 5m`). The `examples/canary-stack.yaml` manifest demonstrates a complete configuration.
 
 ### Backoff strategy
 
@@ -181,6 +188,7 @@ orco logs [service] [--since DURATION] [-f]
 orco restart [service]
 orco graph [--dot]
 orco apply
+orco promote [service]
 ```
 
 Use `--since` to restrict streaming to recent activity, for example `orco logs --since 10m` only emits log records from the last ten minutes.

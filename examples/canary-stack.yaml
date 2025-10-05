@@ -1,0 +1,30 @@
+version: "0.1"
+
+stack:
+  name: canary-demo
+  workdir: .
+
+defaults:
+  health:
+    cmd:
+      command: ["true"]
+
+services:
+  api:
+    runtime: process
+    replicas: 2
+    command: ["sleep", "5"]
+    env:
+      VERSION: v1
+    update:
+      strategy: canary
+      promoteAfter: 30s
+
+  web:
+    runtime: process
+    dependsOn:
+      - target: api
+        require: ready
+    command: ["sleep", "2"]
+    env:
+      API_URL: http://localhost:8080

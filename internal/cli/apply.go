@@ -49,19 +49,18 @@ func newApplyCmd(ctx *context) *cobra.Command {
 				return fmt.Errorf("apply does not support adding or removing services: %s", strings.Join(unsupported, ", "))
 			}
 
-			if err := applyUpdates(cmd, ctx, dep, oldSpec, newSpec, targets); err != nil {
+			if err := applyUpdates(cmd, ctx, doc.File.Stack.Name, dep, oldSpec, newSpec, targets); err != nil {
 				return err
 			}
-
-			ctx.setDeployment(dep, doc.File.Stack.Name, newSpec)
 			return nil
 		},
 	}
 	return cmd
 }
 
-func applyUpdates(cmd *cobra.Command, cliCtx *context, dep *engine.Deployment, oldSpec, newSpec map[string]*stack.Service, services []string) error {
+func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *engine.Deployment, oldSpec, newSpec map[string]*stack.Service, services []string) error {
 	tracker := cliCtx.statusTracker()
+	currentSpec := stack.CloneServiceMap(oldSpec)
 	updated := make([]string, 0, len(services))
 
 	for _, name := range services {
@@ -79,22 +78,81 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, dep *engine.Deployment, o
 		fmt.Fprintf(cmd.OutOrStdout(), "Updating %s (%d replicas)\n", name, replicas)
 		updated = append(updated, name)
 
-		updateErr, promoteErr := runServiceUpdate(cmd.Context(), service, svcSpec)
+		strategy := "rolling"
+		if svcSpec.Update != nil && svcSpec.Update.Strategy != "" {
+			strategy = svcSpec.Update.Strategy
+		}
+		autoPromote := strategy != "canary"
 
-		if updateErr != nil {
-			rollbackErr := rollbackUpdates(cmd.Context(), dep, oldSpec, updated)
-			if rollbackErr != nil {
-				return fmt.Errorf("update %s failed: %v (rollback error: %v)", name, updateErr, rollbackErr)
+		printCanaryPrompt := func(detail string) {
+			detail = strings.TrimSpace(detail)
+			if detail != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Service %s canary ready (%s); run `orco promote %s` to continue rollout.\n", name, detail, name)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Service %s canary ready; run `orco promote %s` to continue rollout.\n", name, name)
 			}
-			return fmt.Errorf("update %s failed: %w", name, updateErr)
 		}
-		if promoteErr != nil && !errors.Is(promoteErr, engine.ErrNoPromotionPending) {
-			rollbackErr := rollbackUpdates(cmd.Context(), dep, oldSpec, updated)
-			if rollbackErr != nil {
-				return fmt.Errorf("promote %s failed: %v (rollback error: %v)", name, promoteErr, rollbackErr)
+
+		updateStart := time.Now()
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- runServiceUpdate(cmd.Context(), service, svcSpec, autoPromote)
+		}()
+
+		ticker := time.NewTicker(50 * time.Millisecond)
+		var updateErr error
+		printedCanary := false
+
+	updateLoop:
+		for {
+			select {
+			case updateErr = <-errCh:
+				ticker.Stop()
+				if updateErr != nil {
+					rollbackErr := rollbackUpdates(cmd.Context(), dep, oldSpec, updated)
+					cliCtx.setDeployment(dep, stackName, oldSpec)
+					if rollbackErr != nil {
+						return fmt.Errorf("update %s failed: %v (rollback error: %v)", name, updateErr, rollbackErr)
+					}
+					return fmt.Errorf("update %s failed: %w", name, updateErr)
+				}
+				break updateLoop
+			case <-ticker.C:
+				if !autoPromote && !printedCanary {
+					snapshot := tracker.Snapshot()
+					if status, ok := snapshot[name]; ok && status.State == engine.EventTypeCanary && status.LastEvent.After(updateStart) {
+						printCanaryPrompt(status.Message)
+						printedCanary = true
+						continue
+					}
+					history := tracker.History(name, 5)
+					for _, transition := range history {
+						if transition.Type == engine.EventTypeCanary && transition.Timestamp.After(updateStart) {
+							printCanaryPrompt(transition.Message)
+							printedCanary = true
+							break
+						}
+					}
+				}
+			case <-cmd.Context().Done():
+				ticker.Stop()
+				return cmd.Context().Err()
 			}
-			return fmt.Errorf("promote %s failed: %w", name, promoteErr)
 		}
+
+		if !autoPromote && !printedCanary {
+			history := tracker.History(name, 5)
+			for _, transition := range history {
+				if transition.Type == engine.EventTypeCanary && transition.Timestamp.After(updateStart) {
+					printCanaryPrompt(transition.Message)
+					printedCanary = true
+					break
+				}
+			}
+		}
+
+		currentSpec[name] = svcSpec.Clone()
+		cliCtx.setDeployment(dep, stackName, currentSpec)
 
 		status := tracker.Snapshot()[name]
 		if status.ReadyReplicas < replicas {
@@ -135,25 +193,30 @@ func rollbackUpdates(ctx stdcontext.Context, dep *engine.Deployment, oldSpec map
 			errs = append(errs, fmt.Errorf("rollback %s: service no longer running", name))
 			continue
 		}
-		updateErr, promoteErr := runServiceUpdate(ctx, service, spec)
-		if updateErr != nil {
-			errs = append(errs, fmt.Errorf("rollback %s: %w", name, updateErr))
-			continue
-		}
-		if promoteErr != nil && !errors.Is(promoteErr, engine.ErrNoPromotionPending) {
-			errs = append(errs, fmt.Errorf("rollback %s: %w", name, promoteErr))
+		if err := runServiceUpdate(ctx, service, spec, true); err != nil {
+			errs = append(errs, fmt.Errorf("rollback %s: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func runServiceUpdate(ctx stdcontext.Context, service *engine.Service, spec *stack.Service) (updateErr, promoteErr error) {
+func runServiceUpdate(ctx stdcontext.Context, service *engine.Service, spec *stack.Service, autoPromote bool) error {
+	if ctx == nil {
+		ctx = stdcontext.Background()
+	}
+
+	if !autoPromote {
+		return service.Update(ctx, spec)
+	}
+
 	updateErrCh := make(chan error, 1)
 	updateDone := make(chan struct{})
 	go func() {
 		updateErrCh <- service.Update(ctx, spec)
 		close(updateDone)
 	}()
+
+	var promoteErr error
 
 promoteLoop:
 	for {
@@ -172,6 +235,9 @@ promoteLoop:
 		}
 	}
 
-	updateErr = <-updateErrCh
-	return updateErr, promoteErr
+	updateErr := <-updateErrCh
+	if updateErr != nil {
+		return updateErr
+	}
+	return promoteErr
 }
