@@ -17,6 +17,18 @@ import (
 	"github.com/Paintersrp/orco/internal/tui"
 )
 
+type stackUI interface {
+	Run(stdcontext.Context) error
+	EventSink() chan<- engine.Event
+	CloseEvents()
+	Stop()
+	Done() <-chan struct{}
+}
+
+var newUI = func() stackUI {
+	return tui.New()
+}
+
 func newUpCmd(ctx *context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "up",
@@ -37,10 +49,23 @@ func newUpCmd(ctx *context) *cobra.Command {
 }
 
 func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
-	ui := tui.New()
+	ui := newUI()
 	uiErrCh := make(chan error, 1)
 	go func() {
 		uiErrCh <- ui.Run(cmd.Context())
+	}()
+
+	events := make(chan engine.Event, 256)
+	trackedEvents := ctx.trackEvents(events, cap(events))
+
+	var forwarder sync.WaitGroup
+	forwarder.Add(1)
+	go func() {
+		defer forwarder.Done()
+		sink := ui.EventSink()
+		for evt := range trackedEvents {
+			sink <- evt
+		}
 	}()
 
 	runCtx, runCancel := stdcontext.WithCancel(stdcontext.WithoutCancel(cmd.Context()))
@@ -53,12 +78,14 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 	defer func() {
 		if deployment != nil {
 			stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
-			if err := deployment.Stop(stopCtx, ui.EventSink()); err != nil && retErr == nil {
+			if err := deployment.Stop(stopCtx, events); err != nil && retErr == nil {
 				retErr = err
 			}
 			cancel()
 			ctx.clearDeployment(deployment)
 		}
+		close(events)
+		forwarder.Wait()
 		ui.CloseEvents()
 		ui.Stop()
 		if uiErr := <-uiErrCh; uiErr != nil && retErr == nil {
@@ -68,7 +95,7 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 
 	orch := ctx.getOrchestrator()
 	var depErr error
-	deployment, depErr = orch.Up(runCtx, doc.File, doc.Graph, ui.EventSink())
+	deployment, depErr = orch.Up(runCtx, doc.File, doc.Graph, events)
 	cancelGuard()
 	if depErr != nil {
 		return depErr
