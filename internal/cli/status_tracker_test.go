@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -13,8 +14,8 @@ func TestStatusTrackerUpdatesReadyAndBlockedState(t *testing.T) {
 	tracker := newStatusTracker()
 	base := time.Now().Add(-10 * time.Second)
 
-	tracker.Apply(engine.Event{Service: "api", Type: engine.EventTypeStarting, Timestamp: base})
-	tracker.Apply(engine.Event{Service: "api", Type: engine.EventTypeBlocked, Message: "waiting", Timestamp: base.Add(time.Second)})
+	tracker.Apply(engine.Event{Service: "api", Replica: -1, Type: engine.EventTypeStarting, Timestamp: base})
+	tracker.Apply(engine.Event{Service: "api", Replica: -1, Type: engine.EventTypeBlocked, Message: "waiting", Timestamp: base.Add(time.Second)})
 
 	snapshot := tracker.Snapshot()["api"]
 	if snapshot.State != engine.EventTypeBlocked {
@@ -27,7 +28,7 @@ func TestStatusTrackerUpdatesReadyAndBlockedState(t *testing.T) {
 		t.Fatalf("expected message to be retained, got %q", snapshot.Message)
 	}
 
-	tracker.Apply(engine.Event{Service: "api", Type: engine.EventTypeReady, Message: "ready", Timestamp: base.Add(2 * time.Second)})
+	tracker.Apply(engine.Event{Service: "api", Replica: 0, Type: engine.EventTypeReady, Message: "ready", Timestamp: base.Add(2 * time.Second)})
 
 	snapshot = tracker.Snapshot()["api"]
 	if snapshot.State != engine.EventTypeReady {
@@ -36,7 +37,55 @@ func TestStatusTrackerUpdatesReadyAndBlockedState(t *testing.T) {
 	if !snapshot.Ready {
 		t.Fatalf("expected ready=true after ready event")
 	}
-	if snapshot.Message != "ready" {
+	if snapshot.Message != "replica 0: ready" {
 		t.Fatalf("expected message to update, got %q", snapshot.Message)
+	}
+}
+
+func TestStatusTrackerAggregatesReplicaReadiness(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStatusTracker()
+	base := time.Now()
+
+	tracker.Apply(engine.Event{Service: "api", Replica: 0, Type: engine.EventTypeStarting, Timestamp: base})
+	tracker.Apply(engine.Event{Service: "api", Replica: 1, Type: engine.EventTypeStarting, Timestamp: base.Add(10 * time.Millisecond)})
+
+	snap := tracker.Snapshot()["api"]
+	if snap.Ready {
+		t.Fatalf("expected service to remain unready until replicas ready")
+	}
+	if snap.Replicas != 2 {
+		t.Fatalf("expected replica count 2, got %d", snap.Replicas)
+	}
+
+	tracker.Apply(engine.Event{Service: "api", Replica: 0, Type: engine.EventTypeReady, Message: "ready", Timestamp: base.Add(20 * time.Millisecond)})
+
+	snap = tracker.Snapshot()["api"]
+	if snap.Ready {
+		t.Fatalf("expected service to remain unready until all replicas ready")
+	}
+
+	tracker.Apply(engine.Event{Service: "api", Replica: 1, Type: engine.EventTypeReady, Message: "ready", Timestamp: base.Add(30 * time.Millisecond)})
+
+	snap = tracker.Snapshot()["api"]
+	if !snap.Ready {
+		t.Fatalf("expected service to report ready once all replicas ready")
+	}
+
+	tracker.Apply(engine.Event{Service: "api", Replica: 1, Type: engine.EventTypeCrashed, Message: "boom", Timestamp: base.Add(40 * time.Millisecond)})
+
+	snap = tracker.Snapshot()["api"]
+	if snap.Ready {
+		t.Fatalf("expected service to be unready after replica crash")
+	}
+	if snap.Restarts != 1 {
+		t.Fatalf("expected restarts=1 after crash, got %d", snap.Restarts)
+	}
+	if snap.State != engine.EventTypeCrashed {
+		t.Fatalf("expected crashed state, got %q", snap.State)
+	}
+	if !strings.Contains(snap.Message, "replica 1") {
+		t.Fatalf("expected message to reference replica, got %q", snap.Message)
 	}
 }

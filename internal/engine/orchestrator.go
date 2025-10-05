@@ -32,7 +32,12 @@ type Deployment struct {
 }
 
 type serviceHandle struct {
-	name       string
+	name     string
+	replicas []*replicaHandle
+}
+
+type replicaHandle struct {
+	index      int
 	supervisor *supervisor
 
 	existsOnce sync.Once
@@ -46,24 +51,72 @@ type serviceHandle struct {
 }
 
 func (h *serviceHandle) awaitExists(ctx context.Context) error {
-	h.existsOnce.Do(func() {
-		h.existsErr = h.supervisor.AwaitExists(ctx)
-	})
-	return h.existsErr
+	for _, replica := range h.replicas {
+		if err := replica.awaitExists(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *serviceHandle) awaitStarted(ctx context.Context) error {
-	h.startedOnce.Do(func() {
-		h.startedErr = h.supervisor.AwaitStarted(ctx)
-	})
-	return h.startedErr
+	for _, replica := range h.replicas {
+		if err := replica.awaitStarted(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *serviceHandle) awaitReady(ctx context.Context) error {
-	h.readyOnce.Do(func() {
-		h.readyErr = h.supervisor.AwaitReady(ctx)
+	for _, replica := range h.replicas {
+		if err := replica.awaitReady(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *serviceHandle) start(ctx context.Context) {
+	for _, replica := range h.replicas {
+		replica.supervisor.Start(ctx)
+	}
+}
+
+func (h *serviceHandle) stop(ctx context.Context, events chan<- Event) error {
+	var firstErr error
+	for i := len(h.replicas) - 1; i >= 0; i-- {
+		replica := h.replicas[i]
+		sendEvent(events, h.name, replica.index, EventTypeStopping, "stopping service", 0, ReasonShutdown, nil)
+		if err := replica.supervisor.Stop(ctx); err != nil {
+			sendEvent(events, h.name, replica.index, EventTypeError, "stop failed", 0, ReasonStopFailed, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("stop service %s replica %d: %w", h.name, replica.index, err)
+			}
+		}
+	}
+	return firstErr
+}
+
+func (r *replicaHandle) awaitExists(ctx context.Context) error {
+	r.existsOnce.Do(func() {
+		r.existsErr = r.supervisor.AwaitExists(ctx)
 	})
-	return h.readyErr
+	return r.existsErr
+}
+
+func (r *replicaHandle) awaitStarted(ctx context.Context) error {
+	r.startedOnce.Do(func() {
+		r.startedErr = r.supervisor.AwaitStarted(ctx)
+	})
+	return r.startedErr
+}
+
+func (r *replicaHandle) awaitReady(ctx context.Context) error {
+	r.readyOnce.Do(func() {
+		r.readyErr = r.supervisor.AwaitReady(ctx)
+	})
+	return r.readyErr
 }
 
 // Up launches services described by the stack in topological order. Events are
@@ -93,8 +146,18 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			return nil, fmt.Errorf("service %s references unsupported runtime %q", name, svc.Runtime)
 		}
 
-		sup := newSupervisor(name, svc, runtimeImpl, events)
-		handles[name] = &serviceHandle{name: name, supervisor: sup}
+		replicaCount := svc.Replicas
+		if replicaCount < 1 {
+			replicaCount = 1
+		}
+
+		replicas := make([]*replicaHandle, 0, replicaCount)
+		for idx := 0; idx < replicaCount; idx++ {
+			sup := newSupervisor(name, idx, svc, runtimeImpl, events)
+			replicas = append(replicas, &replicaHandle{index: idx, supervisor: sup})
+		}
+
+		handles[name] = &serviceHandle{name: name, replicas: replicas}
 	}
 
 	deployment := &Deployment{handles: make([]*serviceHandle, 0, len(services))}
@@ -140,6 +203,7 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 				sendEvent(
 					events,
 					name,
+					-1,
 					EventTypeBlocked,
 					fmt.Sprintf("blocked waiting for %s (%s)", dep.Target, require),
 					0,
@@ -153,7 +217,7 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			}
 		}
 
-		handle.supervisor.Start(ctx)
+		handle.start(ctx)
 		deployment.handles = append(deployment.handles, handle)
 	}
 
@@ -177,13 +241,10 @@ func (d *Deployment) Stop(ctx context.Context, events chan<- Event) error {
 		var firstErr error
 		for i := len(d.handles) - 1; i >= 0; i-- {
 			handle := d.handles[i]
-			sendEvent(events, handle.name, EventTypeStopping, "stopping service", 0, ReasonShutdown, nil)
-			if err := handle.supervisor.Stop(ctx); err != nil {
-				sendEvent(events, handle.name, EventTypeError, "stop failed", 0, ReasonStopFailed, err)
+			if err := handle.stop(ctx, events); err != nil {
 				if firstErr == nil {
-					firstErr = fmt.Errorf("stop service %s: %w", handle.name, err)
+					firstErr = err
 				}
-				continue
 			}
 		}
 		d.stopErr = firstErr

@@ -39,7 +39,7 @@ func TestSupervisorRestartsOnUnready(t *testing.T) {
 	}
 
 	events := make(chan Event, 32)
-	sup := newSupervisor("web", svc, rt, events)
+	sup := newSupervisor("web", 0, svc, rt, events)
 	sup.jitter = func(d time.Duration) time.Duration { return d }
 	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
@@ -175,7 +175,7 @@ func TestSupervisorBackoffJitter(t *testing.T) {
 
 	delayCh := make(chan time.Duration, 8)
 	var delays []time.Duration
-	sup := newSupervisor("db", svc, rt, make(chan Event, 32))
+	sup := newSupervisor("db", 0, svc, rt, make(chan Event, 32))
 	sup.jitter = func(d time.Duration) time.Duration { return d }
 	sup.sleep = func(ctx context.Context, d time.Duration) error {
 		delayCh <- d
@@ -234,7 +234,7 @@ func TestSupervisorMaxRetriesEmitsFailed(t *testing.T) {
 	events := make(chan Event, 32)
 	rt := &fakeRuntime{instances: []*fakeInstance{inst1, inst2}}
 
-	sup := newSupervisor("api", svc, rt, events)
+	sup := newSupervisor("api", 0, svc, rt, events)
 	sup.jitter = func(d time.Duration) time.Duration { return d }
 	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
@@ -306,7 +306,7 @@ func TestSupervisorStartFailuresEmitFailedEvent(t *testing.T) {
 		startCh:   make(chan struct{}, 2),
 	}
 
-	sup := newSupervisor("api", svc, rt, events)
+	sup := newSupervisor("api", 0, svc, rt, events)
 	sup.jitter = func(d time.Duration) time.Duration { return d }
 	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
@@ -377,7 +377,7 @@ func TestSupervisorCancelDuringBackoffDeliversCancellation(t *testing.T) {
 		startCh:   make(chan struct{}, 1),
 	}
 
-	sup := newSupervisor("api", svc, rt, nil)
+	sup := newSupervisor("api", 0, svc, rt, nil)
 	sup.jitter = func(d time.Duration) time.Duration { return d }
 
 	sleepCalled := make(chan struct{})

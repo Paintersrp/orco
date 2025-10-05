@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -17,6 +18,15 @@ type serviceStatus struct {
 	ready     bool
 	restarts  int
 	message   string
+
+	replicaCount int
+	replicas     map[int]*replicaStatus
+}
+
+type replicaStatus struct {
+	ready    bool
+	restarts int
+	state    engine.EventType
 }
 
 // statusTracker maintains in-memory status for services based on engine events.
@@ -40,33 +50,78 @@ func (t *statusTracker) Apply(evt engine.Event) {
 
 	state := t.services[evt.Service]
 	if state == nil {
-		state = &serviceStatus{name: evt.Service, firstSeen: evt.Timestamp}
+		state = &serviceStatus{name: evt.Service, firstSeen: evt.Timestamp, replicas: make(map[int]*replicaStatus)}
 		t.services[evt.Service] = state
+	}
+	if state.replicas == nil {
+		state.replicas = make(map[int]*replicaStatus)
 	}
 	if state.firstSeen.IsZero() {
 		state.firstSeen = evt.Timestamp
 	}
-	state.lastEvent = evt.Timestamp
+	if evt.Timestamp.After(state.lastEvent) {
+		state.lastEvent = evt.Timestamp
+	}
+
+	if evt.Replica >= 0 {
+		rep := state.replicas[evt.Replica]
+		if rep == nil {
+			rep = &replicaStatus{}
+			state.replicas[evt.Replica] = rep
+		}
+		if evt.Type != engine.EventTypeLog {
+			rep.state = evt.Type
+			switch evt.Type {
+			case engine.EventTypeReady:
+				rep.ready = true
+			case engine.EventTypeUnready, engine.EventTypeStopping, engine.EventTypeStopped,
+				engine.EventTypeCrashed, engine.EventTypeFailed:
+				rep.ready = false
+			}
+			if evt.Type == engine.EventTypeCrashed {
+				rep.restarts++
+			}
+		}
+		if evt.Replica+1 > state.replicaCount {
+			state.replicaCount = evt.Replica + 1
+		}
+	}
 
 	if evt.Type != engine.EventTypeLog {
 		state.state = evt.Type
-		switch evt.Type {
-		case engine.EventTypeReady:
-			state.ready = true
-		case engine.EventTypeUnready, engine.EventTypeStopping, engine.EventTypeStopped,
-			engine.EventTypeCrashed, engine.EventTypeFailed, engine.EventTypeBlocked:
-			state.ready = false
-		}
-		if evt.Type == engine.EventTypeCrashed {
-			state.restarts++
-		}
+		message := ""
 		if evt.Message != "" {
-			state.message = evt.Message
+			message = evt.Message
 		} else if evt.Err != nil {
-			state.message = evt.Err.Error()
-		} else {
-			state.message = ""
+			message = evt.Err.Error()
 		}
+		if evt.Replica >= 0 && message != "" {
+			message = fmt.Sprintf("replica %d: %s", evt.Replica, message)
+		}
+		if evt.Replica >= 0 && message == "" {
+			message = fmt.Sprintf("replica %d", evt.Replica)
+		}
+		state.message = message
+	}
+
+	totalRestarts := 0
+	ready := state.replicaCount > 0
+	for i := 0; i < state.replicaCount; i++ {
+		rep := state.replicas[i]
+		if rep == nil || !rep.ready {
+			ready = false
+		}
+		if rep != nil {
+			totalRestarts += rep.restarts
+		}
+	}
+	if state.replicaCount == 0 && (evt.Replica < 0 || evt.Type == engine.EventTypeBlocked) {
+		ready = false
+	}
+	state.ready = ready
+	state.restarts = totalRestarts
+	if state.state == engine.EventTypeReady && !state.ready {
+		state.state = engine.EventTypeStarting
 	}
 }
 
@@ -78,6 +133,7 @@ type ServiceStatus struct {
 	State     engine.EventType
 	Ready     bool
 	Restarts  int
+	Replicas  int
 	Message   string
 }
 
@@ -95,6 +151,7 @@ func (t *statusTracker) Snapshot() map[string]ServiceStatus {
 			State:     state.state,
 			Ready:     state.ready,
 			Restarts:  state.restarts,
+			Replicas:  state.replicaCount,
 			Message:   state.message,
 		}
 	}

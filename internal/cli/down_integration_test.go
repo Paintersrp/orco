@@ -134,10 +134,10 @@ services:
 	if err == nil {
 		t.Fatalf("expected down command to fail due to stop error")
 	}
-	if got, want := err.Error(), "stop service api: boom"; got != want {
+	if got, want := err.Error(), "stop service api replica 0: boom"; got != want {
 		t.Fatalf("unexpected error: got %q want %q", got, want)
 	}
-	if !bytes.Contains(stderr.Bytes(), []byte("stop service api: boom")) {
+	if !bytes.Contains(stderr.Bytes(), []byte("stop service api replica 0: boom")) {
 		t.Fatalf("expected stop error in stderr, got: %s", stderr.String())
 	}
 }

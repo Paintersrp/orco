@@ -17,9 +17,9 @@ func TestOrchestratorGatesOnStartedRequirement(t *testing.T) {
 	dbInstance := &fakeInstance{waitCh: make(chan error, 1)}
 	apiInstance := &fakeInstance{waitCh: make(chan error, 1)}
 
-	rt := newRecordingRuntime(map[string]*fakeInstance{
-		"db":  dbInstance,
-		"api": apiInstance,
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"db":  []*fakeInstance{dbInstance},
+		"api": []*fakeInstance{apiInstance},
 	})
 
 	doc := &stack.StackFile{
@@ -67,13 +67,13 @@ func TestOrchestratorGatesOnStartedRequirement(t *testing.T) {
 		resultCh <- upErr
 	}()
 
-	if name := waitForServiceStart(t, rt.startCh); name != "db" {
+	if name := waitForServiceStart(t, rt.startCh); name != "db[0]" {
 		t.Fatalf("expected db to start first, got %s", name)
 	}
 
 	select {
 	case name := <-rt.startCh:
-		if name != "api" {
+		if name != "api[0]" {
 			t.Fatalf("expected api start, got %s", name)
 		}
 	case <-time.After(200 * time.Millisecond):
@@ -116,9 +116,9 @@ func TestOrchestratorBlocksOnReadyRequirement(t *testing.T) {
 	dbInstance := &fakeInstance{waitCh: make(chan error, 1)}
 	apiInstance := &fakeInstance{waitCh: make(chan error, 1)}
 
-	rt := newRecordingRuntime(map[string]*fakeInstance{
-		"db":  dbInstance,
-		"api": apiInstance,
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"db":  []*fakeInstance{dbInstance},
+		"api": []*fakeInstance{apiInstance},
 	})
 
 	doc := &stack.StackFile{
@@ -166,7 +166,7 @@ func TestOrchestratorBlocksOnReadyRequirement(t *testing.T) {
 		resultCh <- upErr
 	}()
 
-	if name := waitForServiceStart(t, rt.startCh); name != "db" {
+	if name := waitForServiceStart(t, rt.startCh); name != "db[0]" {
 		t.Fatalf("expected db to start first, got %s", name)
 	}
 
@@ -178,7 +178,7 @@ func TestOrchestratorBlocksOnReadyRequirement(t *testing.T) {
 
 	dbInstance.waitCh <- nil
 
-	if name := waitForServiceStart(t, rt.startCh); name != "api" {
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
 		t.Fatalf("expected api start after dependency readiness, got %s", name)
 	}
 
@@ -201,6 +201,149 @@ func TestOrchestratorBlocksOnReadyRequirement(t *testing.T) {
 	defer stopCancel()
 	if err := deployment.Stop(stopCtx, events); err != nil {
 		t.Fatalf("deployment stop: %v", err)
+	}
+}
+
+func TestOrchestratorWaitsForReplicaReadiness(t *testing.T) {
+	db0 := &fakeInstance{waitCh: make(chan error, 1)}
+	db1 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiInstance := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"db":  []*fakeInstance{db0, db1},
+		"api": []*fakeInstance{apiInstance},
+	})
+
+	doc := &stack.StackFile{
+		Services: map[string]*stack.Service{
+			"db": {
+				Runtime:  "test",
+				Replicas: 2,
+			},
+			"api": {
+				Runtime: "test",
+				DependsOn: []stack.Dependency{{
+					Target:  "db",
+					Require: "ready",
+				}},
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 64)
+	drainDone := make(chan struct{})
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	go func() {
+		defer close(drainDone)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+	closed := false
+	defer func() {
+		if !closed {
+			close(events)
+		}
+		<-drainDone
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "db[0]" {
+		t.Fatalf("expected first db replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "db[1]" {
+		t.Fatalf("expected second db replica start, got %s", name)
+	}
+
+	select {
+	case name := <-rt.startCh:
+		t.Fatalf("unexpected service start before readiness: %s", name)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	db0.waitCh <- nil
+
+	select {
+	case name := <-rt.startCh:
+		t.Fatalf("unexpected service start before all replicas ready: %s", name)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	db1.waitCh <- nil
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected api start after all replicas ready, got %s", name)
+	}
+
+	apiInstance.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment returned")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+	close(events)
+	closed = true
+	<-drainDone
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	var dbStops []int
+	replicaStops := make(map[string]map[int]bool)
+	for _, evt := range recordedCopy {
+		if evt.Type != EventTypeStopping {
+			continue
+		}
+		if replicaStops[evt.Service] == nil {
+			replicaStops[evt.Service] = make(map[int]bool)
+		}
+		replicaStops[evt.Service][evt.Replica] = true
+		if evt.Service == "db" {
+			dbStops = append(dbStops, evt.Replica)
+		}
+	}
+	if len(replicaStops["api"]) != 1 || !replicaStops["api"][0] {
+		t.Fatalf("expected stop event for api replica 0, got %+v", replicaStops["api"])
+	}
+	if len(dbStops) != 2 || !replicaStops["db"][0] || !replicaStops["db"][1] {
+		t.Fatalf("expected stop events for both db replicas, got %+v", replicaStops["db"])
 	}
 }
 
@@ -240,9 +383,9 @@ func TestOrchestratorDependencyFailureBlocksDependents(t *testing.T) {
 			tc.configureInstance(dbInstance)
 			apiInstance := &fakeInstance{waitCh: make(chan error, 1)}
 
-			rt := newRecordingRuntime(map[string]*fakeInstance{
-				"db":  dbInstance,
-				"api": apiInstance,
+			rt := newRecordingRuntime(map[string][]*fakeInstance{
+				"db":  []*fakeInstance{dbInstance},
+				"api": []*fakeInstance{apiInstance},
 			})
 
 			dep := stack.Dependency{
@@ -295,14 +438,14 @@ func TestOrchestratorDependencyFailureBlocksDependents(t *testing.T) {
 				t.Fatalf("expected nil deployment on failure")
 			}
 
-			if name := waitForServiceStart(t, rt.startCh); name != "db" {
+			if name := waitForServiceStart(t, rt.startCh); name != "db[0]" {
 				t.Fatalf("expected db to start first, got %s", name)
 			}
 			drainDeadline := time.After(100 * time.Millisecond)
 			for {
 				select {
 				case name := <-rt.startCh:
-					if name == "api" {
+					if name == "api[0]" {
 						t.Fatalf("api should not have started when dependency failed")
 					}
 				case <-drainDeadline:
@@ -356,8 +499,8 @@ func TestOrchestratorDependencyFailureBlocksDependents(t *testing.T) {
 
 func TestOrchestratorEmitsLifecycleMetadata(t *testing.T) {
 	instance := &fakeInstance{waitCh: make(chan error, 1)}
-	rt := newRecordingRuntime(map[string]*fakeInstance{
-		"app": instance,
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"app": []*fakeInstance{instance},
 	})
 
 	doc := &stack.StackFile{
@@ -435,14 +578,14 @@ func TestOrchestratorEmitsLifecycleMetadata(t *testing.T) {
 	if !foundStart {
 		t.Fatalf("missing starting event")
 	}
-	if starting.Attempt != 1 || starting.Reason != ReasonInitialStart {
+	if starting.Attempt != 1 || starting.Reason != ReasonInitialStart || starting.Replica != 0 {
 		t.Fatalf("starting metadata mismatch: %+v", starting)
 	}
 
 	if !foundReady {
 		t.Fatalf("missing ready event")
 	}
-	if ready.Attempt != 1 || ready.Reason != ReasonProbeReady {
+	if ready.Attempt != 1 || ready.Reason != ReasonProbeReady || ready.Replica != 0 {
 		t.Fatalf("ready metadata mismatch: %+v", ready)
 	}
 
@@ -489,28 +632,30 @@ stopLoop:
 	if !foundStopping {
 		t.Fatalf("missing stopping event")
 	}
-	if stopping.Attempt != 0 || stopping.Reason != ReasonShutdown {
+	if stopping.Attempt != 0 || stopping.Reason != ReasonShutdown || stopping.Replica != 0 {
 		t.Fatalf("stopping metadata mismatch: %+v", stopping)
 	}
 
 	if !foundStopped {
 		t.Fatalf("missing stopped event")
 	}
-	if stopped.Attempt != 1 || stopped.Reason != ReasonSupervisorStop {
+	if stopped.Attempt != 1 || stopped.Reason != ReasonSupervisorStop || stopped.Replica != 0 {
 		t.Fatalf("stopped metadata mismatch: %+v", stopped)
 	}
 }
 
 type recordingRuntime struct {
 	mu        sync.Mutex
-	instances map[string]*fakeInstance
+	instances map[string][]*fakeInstance
 	startCh   chan string
+	starts    map[string]int
 }
 
-func newRecordingRuntime(instances map[string]*fakeInstance) *recordingRuntime {
+func newRecordingRuntime(instances map[string][]*fakeInstance) *recordingRuntime {
 	return &recordingRuntime{
 		instances: instances,
 		startCh:   make(chan string, 32),
+		starts:    make(map[string]int),
 	}
 }
 
@@ -518,14 +663,19 @@ func (r *recordingRuntime) Start(ctx context.Context, spec runtimelib.StartSpec)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := spec.Name
-	inst, ok := r.instances[name]
+	insts, ok := r.instances[name]
 	if !ok {
 		return nil, fmt.Errorf("no instance configured for service %s", name)
 	}
-	if r.startCh != nil {
-		r.startCh <- name
+	idx := r.starts[name]
+	if idx >= len(insts) {
+		return nil, fmt.Errorf("no more instances configured for service %s", name)
 	}
-	return inst, nil
+	r.starts[name] = idx + 1
+	if r.startCh != nil {
+		r.startCh <- fmt.Sprintf("%s[%d]", name, idx)
+	}
+	return insts[idx], nil
 }
 
 func waitForServiceStart(t *testing.T, ch <-chan string) string {

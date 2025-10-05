@@ -190,7 +190,7 @@ func synthesizeDropEvent(service string, rec dropRecord) engine.Event {
 	return engine.Event{
 		Timestamp: time.Now(),
 		Service:   service,
-		Replica:   0,
+		Replica:   -1,
 		Type:      engine.EventTypeLog,
 		Message:   fmt.Sprintf("dropped=%d", rec.count),
 		Level:     "warn",
