@@ -46,6 +46,10 @@ services:
       http:
         url: http://localhost:8080/health
         expectStatus: [200]
+      log:
+        pattern: "ready"
+        sources: ["stderr"]
+      expression: http || log
     ports: ["8080:8080"]
     replicas: 2
     restartPolicy:

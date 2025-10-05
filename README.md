@@ -92,6 +92,10 @@ services:
       http:
         url: http://localhost:8080/health
         expectStatus: [200]
+      log:
+        pattern: "ready"
+        sources: ["stderr"]
+      expression: http || log
     ports: [ "8080:8080" ]
     replicas: 2
     restartPolicy:
@@ -120,7 +124,7 @@ services:
 Key behaviors:
 
 - `dependsOn.require` controls whether Orco waits for dependencies to start, exist, or reach readiness.
-- One probe type per service in v0.1 keeps evaluation simple; future releases can expand to logical combinations.
+- Probes support HTTP, TCP, command, and log checks, and an optional `expression` enables simple `OR` combinations.
 - `runtime` can be either `docker` or `process`, enabling mixed workloads.
 
 ## Engine design
@@ -135,7 +139,7 @@ Each service is managed by a supervisor goroutine that controls lifecycle transi
 
 ### Health probes
 
-Version 0.1 supports HTTP, TCP, and command probes with configurable grace periods, intervals, timeouts, and success/failure thresholds. Probes determine when a service transitions between Ready and Unready, ensuring downstream dependencies observe accurate status.
+HTTP, TCP, command, and log probes can be mixed per service. Each probe has configurable grace periods, intervals, timeouts, and success/failure thresholds. When multiple probes are configured, the optional `expression` field allows simple `OR` logic between probe aliases (`http`, `tcp`, `cmd`, `log`). Probes determine when a service transitions between Ready and Unready, ensuring downstream dependencies observe accurate status.
 
 ### Progressive restarts & rolling updates
 
@@ -196,7 +200,7 @@ Command behavior emphasizes descriptive errors, for example: `api blocked: depen
 - Parse and validate `stack.yaml`.
 - Build the dependency DAG and gate startup on readiness requirements.
 - Implement Docker and process runtimes.
-- Support HTTP, TCP, and command health probes (single probe per service).
+- Support HTTP, TCP, command, and log health probes with optional `OR` expressions.
 - Supervisors with exponential backoff and restart limits.
 - Implement `orco up`, `orco down`, `orco status`, and `orco logs -f`.
 - Ship the TUI with status and log panes.
@@ -205,7 +209,6 @@ Command behavior emphasizes descriptive errors, for example: `api blocked: depen
 ### Deferred for v0.2
 
 - Canary update workflows with traffic splitting.
-- Log-based readiness probes.
 - Secrets templating, volumes, and resource controls.
 - Reverse proxy management for traffic shaping.
 - Automated dampening for dependency failure cascades.

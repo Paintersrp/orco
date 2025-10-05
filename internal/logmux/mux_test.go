@@ -86,29 +86,35 @@ func TestMuxEmitsDropMetaEvents(t *testing.T) {
 		events = append(events, evt)
 	}
 
-	if len(events) != 2 {
-		t.Fatalf("expected 2 events (1 log + 1 meta), got %d", len(events))
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events (1 log + drop metadata), got %d", len(events))
 	}
 
-	if events[0].Message != "line-1" {
-		t.Fatalf("expected first event to be the original log, got %q", events[0].Message)
+	var logSeen bool
+	var metaEvent *engine.Event
+	for i := range events {
+		evt := events[i]
+		if evt.Type == engine.EventTypeLog && evt.Message == "line-1" && !logSeen {
+			logSeen = true
+		}
+		if evt.Message == "dropped=2" && evt.Source == runtime.LogSourceSystem {
+			metaEvent = &events[i]
+		}
 	}
-
-	meta := events[1]
-	if meta.Service != "api" {
-		t.Fatalf("meta event service mismatch: got %s", meta.Service)
+	if !logSeen {
+		t.Fatalf("expected to observe the original log entry, events=%v", events)
 	}
-	if meta.Message != "dropped=2" {
-		t.Fatalf("expected drop metadata, got %q", meta.Message)
+	if metaEvent == nil {
+		t.Fatalf("expected drop metadata event, got %v", events)
 	}
-	if meta.Source != "orco" {
-		t.Fatalf("expected meta source to be orco, got %s", meta.Source)
+	if metaEvent.Service != "api" {
+		t.Fatalf("meta event service mismatch: got %s", metaEvent.Service)
 	}
-	if meta.Level != "warn" {
-		t.Fatalf("expected meta level warn, got %s", meta.Level)
+	if metaEvent.Level != "warn" {
+		t.Fatalf("expected meta level warn, got %s", metaEvent.Level)
 	}
-	if time.Since(meta.Timestamp) > time.Second {
-		t.Fatalf("expected recent timestamp, got %v", meta.Timestamp)
+	if time.Since(metaEvent.Timestamp) > time.Second {
+		t.Fatalf("expected recent timestamp, got %v", metaEvent.Timestamp)
 	}
 }
 

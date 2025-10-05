@@ -40,6 +40,10 @@ services:
     health:
       http:
         url: http://localhost:8080/health
+      log:
+        pattern: "ready"
+        sources: [stderr]
+      expression: http || log
 `)
 	if err := os.WriteFile(stackPath, manifest, 0o644); err != nil {
 		t.Fatalf("write stack: %v", err)
@@ -74,6 +78,18 @@ services:
 	}
 	if svc.Health == nil {
 		t.Fatalf("health probe not loaded")
+	}
+	if svc.Health.Log == nil {
+		t.Fatalf("log probe not loaded")
+	}
+	if got, want := svc.Health.Log.Pattern, "ready"; got != want {
+		t.Fatalf("log pattern mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Health.Log.Sources, []string{"stderr"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("log sources mismatch: got %#v want %#v", got, want)
+	}
+	if got, want := svc.Health.Expression, "http || log"; got != want {
+		t.Fatalf("expression mismatch: got %q want %q", got, want)
 	}
 	if got, want := svc.Health.Interval.Duration, 2*time.Second; got != want {
 		t.Fatalf("interval default mismatch: got %v want %v", got, want)
@@ -338,7 +354,7 @@ services:
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "multiple probe types") {
+	if !strings.Contains(err.Error(), "expression") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

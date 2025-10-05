@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -94,6 +95,8 @@ type ProbeSpec struct {
 	HTTP             *HTTPProbeSpec `yaml:"http"`
 	TCP              *TCPProbeSpec  `yaml:"tcp"`
 	Command          *CommandProbe  `yaml:"cmd"`
+	Log              *LogProbeSpec  `yaml:"log"`
+	Expression       string         `yaml:"expression"`
 }
 
 // HTTPProbeSpec defines an HTTP probe.
@@ -111,6 +114,13 @@ type TCPProbeSpec struct {
 type CommandProbe struct {
 	Command []string `yaml:"command"`
 	Timeout Duration `yaml:"timeout"`
+}
+
+// LogProbeSpec defines a log pattern probe.
+type LogProbeSpec struct {
+	Pattern string   `yaml:"pattern"`
+	Sources []string `yaml:"sources"`
+	Levels  []string `yaml:"levels"`
 }
 
 // UpdateStrategy controls rolling update behaviour.
@@ -229,30 +239,55 @@ func (s *Stack) Validate() error {
 }
 
 func validateProbe(name string, p *ProbeSpec) error {
+	configured := map[string]bool{}
 	probes := 0
 	if p.HTTP != nil {
 		probes++
+		configured["http"] = true
 		if p.HTTP.URL == "" {
 			return fmt.Errorf("%s: is required", probeField(name, "http", "url"))
 		}
 	}
 	if p.TCP != nil {
 		probes++
+		configured["tcp"] = true
 		if p.TCP.Address == "" {
 			return fmt.Errorf("%s: is required", probeField(name, "tcp", "address"))
 		}
 	}
 	if p.Command != nil {
 		probes++
+		configured["cmd"] = true
 		if len(p.Command.Command) == 0 {
 			return fmt.Errorf("%s: must contain at least one entry", probeField(name, "cmd", "command"))
 		}
 	}
-	if probes > 1 {
-		return fmt.Errorf("%s: multiple probe types configured; only one is supported", probeField(name))
+	if p.Log != nil {
+		probes++
+		configured["log"] = true
+		if strings.TrimSpace(p.Log.Pattern) == "" {
+			return fmt.Errorf("%s: is required", probeField(name, "log", "pattern"))
+		}
+		if _, err := regexp.Compile(p.Log.Pattern); err != nil {
+			return fmt.Errorf("%s: invalid pattern %q: %w", probeField(name, "log", "pattern"), p.Log.Pattern, err)
+		}
 	}
 	if probes == 0 {
 		return fmt.Errorf("%s: probe configuration is required", probeField(name))
+	}
+	if probes > 1 && strings.TrimSpace(p.Expression) == "" {
+		return fmt.Errorf("%s: is required when multiple probes are configured", probeField(name, "expression"))
+	}
+	if strings.TrimSpace(p.Expression) != "" {
+		refs, err := parseProbeExpression(p.Expression)
+		if err != nil {
+			return fmt.Errorf("%s: %w", probeField(name, "expression"), err)
+		}
+		for _, ref := range refs {
+			if !configured[ref] {
+				return fmt.Errorf("%s: references undefined probe %q", probeField(name, "expression"), ref)
+			}
+		}
 	}
 	if p.FailureThreshold == 0 {
 		p.FailureThreshold = 3
@@ -308,7 +343,7 @@ func (p *ProbeSpec) ApplyDefaults(defaults *ProbeSpec) {
 	if defaults == nil {
 		return
 	}
-	hasType := p.HTTP != nil || p.TCP != nil || p.Command != nil
+	hasType := p.HTTP != nil || p.TCP != nil || p.Command != nil || p.Log != nil
 	if !hasType {
 		if p.HTTP == nil && defaults.HTTP != nil {
 			p.HTTP = &HTTPProbeSpec{
@@ -323,6 +358,13 @@ func (p *ProbeSpec) ApplyDefaults(defaults *ProbeSpec) {
 			p.Command = &CommandProbe{
 				Command: append([]string(nil), defaults.Command.Command...),
 				Timeout: defaults.Command.Timeout,
+			}
+		}
+		if p.Log == nil && defaults.Log != nil {
+			p.Log = &LogProbeSpec{
+				Pattern: defaults.Log.Pattern,
+				Sources: append([]string(nil), defaults.Log.Sources...),
+				Levels:  append([]string(nil), defaults.Log.Levels...),
 			}
 		}
 	}
@@ -345,6 +387,9 @@ func (p *ProbeSpec) ApplyDefaults(defaults *ProbeSpec) {
 		if p.Command.Timeout.Duration == 0 {
 			p.Command.Timeout = defaults.Command.Timeout
 		}
+	}
+	if strings.TrimSpace(p.Expression) == "" {
+		p.Expression = defaults.Expression
 	}
 }
 
@@ -409,7 +454,48 @@ func (p *ProbeSpec) Clone() *ProbeSpec {
 			Timeout: p.Command.Timeout,
 		}
 	}
+	if p.Log != nil {
+		cp.Log = &LogProbeSpec{
+			Pattern: p.Log.Pattern,
+			Sources: append([]string(nil), p.Log.Sources...),
+			Levels:  append([]string(nil), p.Log.Levels...),
+		}
+	}
 	return &cp
+}
+
+func parseProbeExpression(expr string) ([]string, error) {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return nil, fmt.Errorf("expression is empty")
+	}
+	tokens := strings.Fields(trimmed)
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("expression is empty")
+	}
+	expectProbe := true
+	refs := make([]string, 0, (len(tokens)+1)/2)
+	for _, token := range tokens {
+		lower := strings.ToLower(token)
+		if expectProbe {
+			switch lower {
+			case "http", "tcp", "cmd", "log":
+				refs = append(refs, lower)
+				expectProbe = false
+			default:
+				return nil, fmt.Errorf("invalid probe reference %q", token)
+			}
+			continue
+		}
+		if lower != "or" && token != "||" {
+			return nil, fmt.Errorf("unsupported operator %q", token)
+		}
+		expectProbe = true
+	}
+	if expectProbe {
+		return nil, fmt.Errorf("expression is incomplete")
+	}
+	return refs, nil
 }
 
 // Clone creates a deep copy of the restart policy.
