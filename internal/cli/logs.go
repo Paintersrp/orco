@@ -1,18 +1,14 @@
 package cli
 
 import (
-	stdcontext "context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Paintersrp/orco/internal/cliutil"
 	"github.com/Paintersrp/orco/internal/engine"
-	"github.com/Paintersrp/orco/internal/logmux"
 )
 
 func newLogsCmd(ctx *context) *cobra.Command {
@@ -42,64 +38,74 @@ func newLogsCmd(ctx *context) *cobra.Command {
 			if since > 0 {
 				cutoff = time.Now().Add(-since)
 			}
-			events := make(chan engine.Event, logBufferSize)
-			mux := logmux.New(logBufferSize)
-			mux.Add(events)
 
-			var printer sync.WaitGroup
-			printer.Add(1)
+			events, release, ok := ctx.subscribeLogStream(logBufferSize)
+			if !ok {
+				_, stackName := ctx.currentDeploymentInfo()
+				if stackName != "" {
+					return fmt.Errorf("stack %s has no active deployment", stackName)
+				}
+				return fmt.Errorf("no active deployment: start services with \"orco up\" first")
+			}
+			defer release()
 
 			encoder := json.NewEncoder(cmd.OutOrStdout())
-			go func() {
-				defer printer.Done()
-				for event := range mux.Output() {
-					if event.Type != engine.EventTypeLog {
-						continue
-					}
-					if filter != "" && event.Service != filter {
-						continue
-					}
-					if !cutoff.IsZero() {
-						ts := event.Timestamp
-						if ts.IsZero() {
-							ts = time.Now()
-						}
-						if ts.Before(cutoff) {
-							continue
-						}
-					}
-					cliutil.EncodeLogEvent(encoder, cmd.ErrOrStderr(), event)
+
+			process := func(event engine.Event) {
+				if event.Type != engine.EventTypeLog {
+					return
 				}
-			}()
-
-			orch := ctx.getOrchestrator()
-			deployment, err := orch.Up(cmd.Context(), doc.File, doc.Graph, events)
-			if err != nil {
-				close(events)
-				mux.Close()
-				printer.Wait()
-				return err
+				if filter != "" && event.Service != filter {
+					return
+				}
+				if !cutoff.IsZero() {
+					ts := event.Timestamp
+					if ts.IsZero() {
+						ts = time.Now()
+					}
+					if ts.Before(cutoff) {
+						return
+					}
+				}
+				cliutil.EncodeLogEvent(encoder, cmd.ErrOrStderr(), event)
 			}
 
-			if follow {
-				<-cmd.Context().Done()
+			drainBuffered := func() bool {
+				for {
+					select {
+					case evt, ok := <-events:
+						if !ok {
+							return true
+						}
+						process(evt)
+					default:
+						return false
+					}
+				}
 			}
 
-			var stopErr error
-			if deployment != nil {
-				stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
-				stopErr = deployment.Stop(stopCtx, events)
-				cancel()
+			if closed := drainBuffered(); closed {
+				return nil
 			}
 
-			close(events)
-			mux.Close()
-			printer.Wait()
-
-			if stopErr != nil && !errors.Is(stopErr, stdcontext.Canceled) {
-				return stopErr
+			if !follow {
+				return nil
 			}
-			return nil
+
+			for {
+				select {
+				case <-cmd.Context().Done():
+					return nil
+				case evt, ok := <-events:
+					if !ok {
+						return nil
+					}
+					process(evt)
+					if closed := drainBuffered(); closed {
+						return nil
+					}
+				}
+			}
 		},
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
