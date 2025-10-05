@@ -395,13 +395,7 @@ func (u *UI) applyEvent(evt engine.Event) {
 		if evt.Type == engine.EventTypeCrashed {
 			state.restarts++
 		}
-		if evt.Message != "" {
-			state.message = evt.Message
-		} else if evt.Err != nil {
-			state.message = evt.Err.Error()
-		} else {
-			state.message = ""
-		}
+		state.message = formatEventMessage(evt)
 	}
 
 	if evt.Replica+1 > state.replicas {
@@ -422,6 +416,27 @@ func (u *UI) applyEvent(evt engine.Event) {
 	u.mu.Unlock()
 
 	u.queueRefresh(updateLogs)
+}
+
+func formatEventMessage(evt engine.Event) string {
+	var parts []string
+	if evt.Message != "" {
+		parts = append(parts, evt.Message)
+	}
+	if evt.Err != nil {
+		parts = append(parts, evt.Err.Error())
+	}
+
+	message := strings.Join(parts, ": ")
+	if evt.Reason != "" {
+		if message != "" {
+			message = fmt.Sprintf("%s (%s)", message, evt.Reason)
+		} else {
+			message = evt.Reason
+		}
+	}
+
+	return message
 }
 
 func (u *UI) refreshAge() {
