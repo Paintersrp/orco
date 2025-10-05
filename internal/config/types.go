@@ -68,6 +68,7 @@ type ServiceSpec struct {
 	Env             map[string]string `yaml:"env"`
 	EnvFromFile     string            `yaml:"envFromFile"`
 	Ports           []string          `yaml:"ports"`
+	Volumes         []string          `yaml:"volumes"`
 	DependsOn       []DepEdge         `yaml:"dependsOn"`
 	Health          *ProbeSpec        `yaml:"health"`
 	Update          *UpdateStrategy   `yaml:"update"`
@@ -218,6 +219,11 @@ func (s *Stack) Validate() error {
 				return fmt.Errorf("%s: %w", serviceField(name, fmt.Sprintf("ports[%d]", i)), err)
 			}
 		}
+		for i, volume := range svc.Volumes {
+			if err := validateVolumeSpec(volume); err != nil {
+				return fmt.Errorf("%s: %w", serviceField(name, fmt.Sprintf("volumes[%d]", i)), err)
+			}
+		}
 	}
 	return nil
 }
@@ -359,6 +365,9 @@ func (s *ServiceSpec) Clone() *ServiceSpec {
 	}
 	if s.Ports != nil {
 		cp.Ports = append([]string(nil), s.Ports...)
+	}
+	if s.Volumes != nil {
+		cp.Volumes = append([]string(nil), s.Volumes...)
 	}
 	if s.DependsOn != nil {
 		cp.DependsOn = append([]DepEdge(nil), s.DependsOn...)

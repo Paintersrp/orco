@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,10 +141,38 @@ func buildStartSpec(name string, replica int, svc *stack.Service) runtime.StartS
 	if len(svc.Ports) > 0 {
 		spec.Ports = append([]string(nil), svc.Ports...)
 	}
+	if len(svc.Volumes) > 0 {
+		spec.Volumes = make([]runtime.Volume, 0, len(svc.Volumes))
+		for _, mapping := range svc.Volumes {
+			source, target, mode := splitResolvedVolume(mapping)
+			spec.Volumes = append(spec.Volumes, runtime.Volume{
+				Source: source,
+				Target: target,
+				Mode:   mode,
+			})
+		}
+	}
 	spec.Workdir = svc.ResolvedWorkdir
 	spec.Health = svc.Health
 	spec.Service = svc.Clone()
 	return spec
+}
+
+func splitResolvedVolume(spec string) (source, target, mode string) {
+	first := strings.Index(spec, ":")
+	if first == -1 {
+		return spec, "", ""
+	}
+	source = spec[:first]
+	remainder := spec[first+1:]
+	second := strings.Index(remainder, ":")
+	if second == -1 {
+		target = remainder
+		return source, target, ""
+	}
+	target = remainder[:second]
+	mode = remainder[second+1:]
+	return source, target, mode
 }
 
 func deriveRestartPolicy(svc *stack.Service) restartPolicy {

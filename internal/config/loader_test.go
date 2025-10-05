@@ -367,6 +367,91 @@ services:
 	}
 }
 
+func TestLoadResolvesVolumeSpecs(t *testing.T) {
+	dir := t.TempDir()
+	workdir := filepath.Join(dir, "app")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+
+	t.Setenv("CACHE_PATH", "./cache")
+
+	stackPath := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+  workdir: ./app
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    volumes:
+      - ./data:/var/lib/data
+      - ${CACHE_PATH}:/cache:ro
+    health:
+      tcp:
+        address: localhost:1234
+`)
+	if err := os.WriteFile(stackPath, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := Load(stackPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	svc := doc.Services["api"]
+	if svc == nil {
+		t.Fatalf("service api missing")
+	}
+
+	want := []string{
+		filepath.Join(workdir, "data") + ":/var/lib/data",
+		filepath.Join(workdir, "cache") + ":/cache:ro",
+	}
+	if got := svc.Volumes; len(got) != len(want) {
+		t.Fatalf("unexpected volumes length: got %d want %d", len(got), len(want))
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("volume %d mismatch: got %q want %q", i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestLoadRejectsInvalidVolumeSpec(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    volumes: [":/app"]
+    health:
+      tcp:
+        address: localhost:1234
+`)
+	if err := os.WriteFile(stackPath, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	_, err := Load(stackPath)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "services.api.volumes[0]") {
+		t.Fatalf("error missing field path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "host path is required") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
 func TestLoadMalformedPort(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")

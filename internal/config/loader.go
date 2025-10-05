@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -83,6 +84,31 @@ func Load(path string) (*Stack, error) {
 			svc.Env = merged
 		} else {
 			svc.Env = nil
+		}
+
+		if len(svc.Volumes) > 0 {
+			resolved := make([]string, 0, len(svc.Volumes))
+			for i, volume := range svc.Volumes {
+				expanded := os.ExpandEnv(volume)
+				host, container, mode, err := splitVolumeSpec(expanded)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", serviceField(name, fmt.Sprintf("volumes[%d]", i)), err)
+				}
+				if !filepath.IsAbs(host) {
+					host = filepath.Join(resolvedWorkdir, host)
+				}
+				host = filepath.Clean(host)
+				container = pathpkg.Clean(container)
+				if !pathpkg.IsAbs(container) {
+					return nil, fmt.Errorf("%s: container path %q must be absolute", serviceField(name, fmt.Sprintf("volumes[%d]", i)), container)
+				}
+				normalized := host + ":" + container
+				if mode != "" {
+					normalized += ":" + mode
+				}
+				resolved = append(resolved, normalized)
+			}
+			svc.Volumes = resolved
 		}
 	}
 
