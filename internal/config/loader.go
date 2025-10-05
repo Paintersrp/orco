@@ -159,20 +159,52 @@ func loadEnvFile(path string) (map[string]string, error) {
 			return nil, fmt.Errorf("load env file %q: invalid key on line %d", path, lineNo)
 		}
 		value := strings.TrimSpace(raw[sep+1:])
-		if strings.HasPrefix(value, "\"") {
-			if len(value) < 2 || value[len(value)-1] != '"' {
+		if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+			quote := value[0]
+			end := -1
+			switch quote {
+			case '"':
+				escaped := false
+				for i := 1; i < len(value); i++ {
+					c := value[i]
+					if escaped {
+						escaped = false
+						continue
+					}
+					if c == '\\' {
+						escaped = true
+						continue
+					}
+					if c == quote {
+						end = i
+						break
+					}
+				}
+			case '\'':
+				if idx := strings.IndexByte(value[1:], quote); idx >= 0 {
+					end = idx + 1
+				}
+			}
+			if end == -1 {
 				return nil, fmt.Errorf("load env file %q: unmatched quote on line %d", path, lineNo)
 			}
-			unquoted, err := strconv.Unquote(value)
-			if err != nil {
-				return nil, fmt.Errorf("load env file %q: parse value for %s on line %d: %w", path, key, lineNo, err)
+			quoted := value[:end+1]
+			remainder := strings.TrimSpace(value[end+1:])
+			if comment := strings.IndexRune(remainder, '#'); comment >= 0 {
+				remainder = strings.TrimSpace(remainder[:comment])
 			}
-			value = unquoted
-		} else if strings.HasPrefix(value, "'") {
-			if len(value) < 2 || value[len(value)-1] != '\'' {
-				return nil, fmt.Errorf("load env file %q: unmatched quote on line %d", path, lineNo)
+			if remainder != "" {
+				return nil, fmt.Errorf("load env file %q: invalid characters after quoted value on line %d", path, lineNo)
 			}
-			value = value[1 : len(value)-1]
+			if quote == '"' {
+				unquoted, err := strconv.Unquote(quoted)
+				if err != nil {
+					return nil, fmt.Errorf("load env file %q: parse value for %s on line %d: %w", path, key, lineNo, err)
+				}
+				value = unquoted
+			} else {
+				value = quoted[1 : len(quoted)-1]
+			}
 		} else if comment := strings.IndexRune(value, '#'); comment >= 0 {
 			value = strings.TrimSpace(value[:comment])
 		}
