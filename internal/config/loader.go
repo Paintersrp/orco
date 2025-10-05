@@ -133,8 +133,8 @@ func loadEnvFile(path string) (map[string]string, error) {
 			return nil, fmt.Errorf("load env file %q: invalid key on line %d", path, lineNo)
 		}
 		value := strings.TrimSpace(raw[sep+1:])
-		if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
-			if len(value) < 2 || value[len(value)-1] != value[0] {
+		if strings.HasPrefix(value, "\"") {
+			if len(value) < 2 || value[len(value)-1] != '"' {
 				return nil, fmt.Errorf("load env file %q: unmatched quote on line %d", path, lineNo)
 			}
 			unquoted, err := strconv.Unquote(value)
@@ -142,6 +142,11 @@ func loadEnvFile(path string) (map[string]string, error) {
 				return nil, fmt.Errorf("load env file %q: parse value for %s on line %d: %w", path, key, lineNo, err)
 			}
 			value = unquoted
+		} else if strings.HasPrefix(value, "'") {
+			if len(value) < 2 || value[len(value)-1] != '\'' {
+				return nil, fmt.Errorf("load env file %q: unmatched quote on line %d", path, lineNo)
+			}
+			value = value[1 : len(value)-1]
 		} else if comment := strings.IndexRune(value, '#'); comment >= 0 {
 			value = strings.TrimSpace(value[:comment])
 		}

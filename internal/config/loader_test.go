@@ -451,6 +451,31 @@ services:
 	}
 }
 
+func TestLoadEnvFileSingleQuotedValues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vars.env")
+	contents := strings.Join([]string{
+		"SINGLE='value with spaces'",
+		"HASHED='value # with hash'",
+		"# comment line should be ignored",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	values, err := loadEnvFile(path)
+	if err != nil {
+		t.Fatalf("loadEnvFile returned error: %v", err)
+	}
+
+	if got, want := values["SINGLE"], "value with spaces"; got != want {
+		t.Fatalf("single-quoted value mismatch: got %q want %q", got, want)
+	}
+	if got, want := values["HASHED"], "value # with hash"; got != want {
+		t.Fatalf("single-quoted hash value mismatch: got %q want %q", got, want)
+	}
+}
+
 func equalIntSlices(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
