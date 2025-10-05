@@ -271,6 +271,21 @@ func (u *UI) consumeEvents(ctx context.Context) {
 }
 
 func (u *UI) handleKey(event *tcell.EventKey) *tcell.EventKey {
+	switch focused := u.app.GetFocus(); focused {
+	case nil:
+		return event
+	case u.table:
+		if u.logsFocused {
+			u.logsFocused = false
+		}
+	case u.logs:
+		if !u.logsFocused {
+			u.logsFocused = true
+		}
+	default:
+		return event
+	}
+
 	switch event.Key() {
 	case tcell.KeyEnter:
 		u.toggleFocus()
@@ -325,10 +340,12 @@ func (u *UI) showFilterPrompt() {
 			u.applyFilter(input.GetText())
 			u.pages.RemovePage(filterPageName)
 			u.app.SetFocus(u.table)
+			u.logsFocused = false
 		}).
 		AddButton("Cancel", func() {
 			u.pages.RemovePage(filterPageName)
 			u.app.SetFocus(u.table)
+			u.logsFocused = false
 		})
 
 	form.SetBorder(true).SetTitle("Filter Services")
@@ -373,6 +390,7 @@ func (u *UI) showErrorModal(message string) {
 		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 			u.pages.RemovePage(filterPageName)
 			u.app.SetFocus(u.table)
+			u.logsFocused = false
 		})
 
 	// Ensure previous filter prompt is removed to avoid stacking pages.
