@@ -386,7 +386,7 @@ services:
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "expected host:container") {
+	if !strings.Contains(err.Error(), "Invalid containerPort") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -414,7 +414,7 @@ services:
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "port numbers must be numeric") {
+	if !strings.Contains(err.Error(), "Invalid hostPort") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -442,7 +442,7 @@ services:
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "port numbers must be numeric") {
+	if !strings.Contains(err.Error(), "Invalid hostPort") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

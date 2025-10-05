@@ -3,9 +3,10 @@ package config
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/docker/go-connections/nat"
 )
 
 // Duration wraps time.Duration for YAML unmarshalling.
@@ -266,32 +267,31 @@ func validateProbe(name string, p *ProbeSpec) error {
 }
 
 func validatePort(spec string) error {
-	base := spec
-	proto := ""
-	if idx := strings.Index(spec, "/"); idx != -1 {
-		base = spec[:idx]
-		proto = spec[idx+1:]
+	mappings, err := nat.ParsePortSpec(spec)
+	if err != nil {
+		return fmt.Errorf("invalid port mapping %q: %w", spec, err)
 	}
-	parts := strings.Split(base, ":")
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid port mapping %q (expected host:container or host:container/proto)", spec)
+	if len(mappings) == 0 {
+		return fmt.Errorf("invalid port mapping %q: no port definitions found", spec)
 	}
-	if strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-		return fmt.Errorf("invalid port mapping %q (expected host:container or host:container/proto)", spec)
-	}
-	for _, segment := range []string{parts[0], parts[1]} {
-		port, err := strconv.Atoi(segment)
+	for _, mapping := range mappings {
+		hostPort := strings.TrimSpace(mapping.Binding.HostPort)
+		if hostPort == "" {
+			return fmt.Errorf("invalid port mapping %q: host port must be specified", spec)
+		}
+		hostStart, hostEnd, err := nat.ParsePortRange(hostPort)
 		if err != nil {
-			return fmt.Errorf("invalid port mapping %q (port numbers must be numeric in range 1-65535)", spec)
+			return fmt.Errorf("invalid port mapping %q: invalid host port %q", spec, hostPort)
 		}
-		if port < 1 || port > 65535 {
-			return fmt.Errorf("invalid port mapping %q (port numbers must be numeric in range 1-65535)", spec)
+		if hostStart == 0 || hostEnd == 0 {
+			return fmt.Errorf("invalid port mapping %q: host port must be in range 1-65535", spec)
 		}
-	}
-	if proto != "" {
-		protoLower := strings.ToLower(proto)
-		if protoLower != "tcp" && protoLower != "udp" {
-			return fmt.Errorf("invalid port mapping %q (expected host:container or host:container/proto)", spec)
+		containerStart, containerEnd, err := mapping.Port.Range()
+		if err != nil {
+			return fmt.Errorf("invalid port mapping %q: %w", spec, err)
+		}
+		if containerStart == 0 || containerEnd == 0 {
+			return fmt.Errorf("invalid port mapping %q: container port must be in range 1-65535", spec)
 		}
 	}
 	return nil
