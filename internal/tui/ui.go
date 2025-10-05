@@ -74,6 +74,19 @@ type UI struct {
 	done      chan struct{}
 }
 
+type serviceEvent struct {
+	Timestamp time.Time        `json:"ts"`
+	Service   string           `json:"service"`
+	Replica   int              `json:"replica"`
+	Type      engine.EventType `json:"type"`
+	Level     string           `json:"level,omitempty"`
+	Message   string           `json:"msg,omitempty"`
+	Source    string           `json:"source,omitempty"`
+	Reason    string           `json:"reason,omitempty"`
+	Attempt   int              `json:"attempt,omitempty"`
+	Error     string           `json:"error,omitempty"`
+}
+
 type serviceState struct {
 	name      string
 	firstSeen time.Time
@@ -84,7 +97,7 @@ type serviceState struct {
 	restarts  int
 	message   string
 
-	logs []cliutil.LogRecord
+	events []serviceEvent
 }
 
 // New constructs a UI configured with the supplied options.
@@ -402,13 +415,42 @@ func (u *UI) applyEvent(evt engine.Event) {
 		state.replicas = evt.Replica + 1
 	}
 
+	record := serviceEvent{
+		Timestamp: evt.Timestamp,
+		Service:   evt.Service,
+		Replica:   evt.Replica,
+		Type:      evt.Type,
+		Reason:    evt.Reason,
+		Attempt:   evt.Attempt,
+	}
+	if evt.Level != "" {
+		record.Level = evt.Level
+	}
+	if evt.Message != "" {
+		record.Message = evt.Message
+	}
+	if evt.Source != "" {
+		record.Source = evt.Source
+	}
+	if evt.Err != nil {
+		record.Error = evt.Err.Error()
+	}
 	if evt.Type == engine.EventTypeLog {
-		record := cliutil.NewLogRecord(evt)
-		state.logs = append(state.logs, record)
-		if len(state.logs) > u.maxLogs {
-			trim := len(state.logs) - u.maxLogs
-			state.logs = append([]cliutil.LogRecord(nil), state.logs[trim:]...)
+		logRecord := cliutil.NewLogRecord(evt)
+		if record.Level == "" {
+			record.Level = logRecord.Level
 		}
+		if record.Message == "" {
+			record.Message = logRecord.Message
+		}
+		if record.Source == "" {
+			record.Source = logRecord.Source
+		}
+	}
+	state.events = append(state.events, record)
+	if len(state.events) > u.maxLogs {
+		trim := len(state.events) - u.maxLogs
+		state.events = append([]serviceEvent(nil), state.events[trim:]...)
 	}
 
 	selected := state.name == u.selected
@@ -535,7 +577,7 @@ func (u *UI) renderLogsLocked() {
 
 	u.logs.SetTitle(fmt.Sprintf("%s (%s)", logsTitle, state.name))
 
-	for _, record := range state.logs {
+	for _, record := range state.events {
 		var data []byte
 		var err error
 		if u.logsPretty {
