@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
 
+	"github.com/Paintersrp/orco/internal/config"
 	"github.com/Paintersrp/orco/internal/probe"
 	"github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/stack"
@@ -112,6 +115,110 @@ func TestRuntimeStartStopLogs(t *testing.T) {
 	case <-drained:
 	case <-time.After(30 * time.Second):
 		t.Fatal("logs channel did not close")
+	}
+}
+
+func TestRuntimeEnvFromFile(t *testing.T) {
+	requireDocker(t)
+
+	t.Setenv("DOCKER_FILE_VALUE", "from-env")
+
+	stackDir := t.TempDir()
+	envPath := filepath.Join(stackDir, "vars.env")
+	if err := os.WriteFile(envPath, []byte("FOO=${DOCKER_FILE_VALUE}\n"), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+  workdir: .
+services:
+  api:
+    runtime: docker
+    image: ghcr.io/library/alpine:3.19
+    command: ["sh", "-c", 'echo "$FOO"']
+    envFromFile: vars.env
+    health:
+      cmd:
+        command: ["true"]
+`)
+	stackPath := filepath.Join(stackDir, "stack.yaml")
+	if err := os.WriteFile(stackPath, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := config.Load(stackPath)
+	if err != nil {
+		t.Fatalf("load stack: %v", err)
+	}
+
+	svc := doc.Services["api"]
+	if svc == nil {
+		t.Fatalf("service api missing")
+	}
+	if got := svc.Env["FOO"]; got != "from-env" {
+		t.Fatalf("env from file mismatch: got %q want %q", got, "from-env")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	rt := New()
+	spec := runtime.StartSpec{
+		Name:    "api",
+		Image:   svc.Image,
+		Command: svc.Command,
+		Env:     svc.Env,
+		Ports:   svc.Ports,
+		Workdir: svc.ResolvedWorkdir,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := rt.Start(ctx, spec)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stopCancel()
+		_ = inst.Kill(stopCtx)
+	})
+
+	logs, err := inst.Logs(ctx)
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	if logs == nil {
+		t.Fatal("logs channel is nil")
+	}
+
+	var message string
+	select {
+	case entry, ok := <-logs:
+		if !ok {
+			t.Fatal("logs channel closed early")
+		}
+		message = strings.TrimSpace(entry.Message)
+	case <-time.After(30 * time.Second):
+		t.Fatal("expected log line")
+	}
+
+	if message != "from-env" {
+		t.Fatalf("container env mismatch: got %q want %q", message, "from-env")
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer waitCancel()
+	if err := inst.Wait(waitCtx); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stopCancel()
+	if err := inst.Stop(stopCtx); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
 }
 

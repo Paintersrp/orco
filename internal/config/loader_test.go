@@ -15,10 +15,11 @@ func TestLoadValidStack(t *testing.T) {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
 	envFile := filepath.Join(workdir, "vars.env")
-	if err := os.WriteFile(envFile, []byte("TOKEN=abc"), 0o644); err != nil {
+	if err := os.WriteFile(envFile, []byte("TOKEN=${FILE_SECRET}\nPASSWORD=from-file"), 0o644); err != nil {
 		t.Fatalf("write env file: %v", err)
 	}
 
+	t.Setenv("FILE_SECRET", "alpha")
 	t.Setenv("WORKDIR_PATH", "./app")
 	t.Setenv("ENV_FILE", "./vars.env")
 	t.Setenv("API_PASSWORD", "s3cr3t")
@@ -58,6 +59,9 @@ services:
 	}
 	if got, want := svc.ResolvedWorkdir, workdir; got != want {
 		t.Fatalf("resolved workdir mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Env["TOKEN"], "alpha"; got != want {
+		t.Fatalf("env file value mismatch: got %q want %q", got, want)
 	}
 	if got, want := svc.Env["PASSWORD"], "s3cr3t"; got != want {
 		t.Fatalf("env expansion mismatch: got %q want %q", got, want)

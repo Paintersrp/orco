@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Paintersrp/orco/internal/config"
 	"github.com/Paintersrp/orco/internal/engine"
 	runtimelib "github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/stack"
@@ -180,6 +181,94 @@ func TestWaitReadyBlocksUntilProbeSuccess(t *testing.T) {
 	}, 2*time.Second)
 	if dbReadyAgain.Err != nil {
 		t.Fatalf("db re-ready event returned error: %v", dbReadyAgain.Err)
+	}
+}
+
+func TestStartReceivesEnvFromFile(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("process runtime tests skipped on windows")
+	}
+
+	t.Setenv("PROC_FILE_VALUE", "from-env")
+
+	stackDir := t.TempDir()
+	envPath := filepath.Join(stackDir, "vars.env")
+	if err := os.WriteFile(envPath, []byte("FOO=${PROC_FILE_VALUE}\n"), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+  workdir: .
+services:
+  worker:
+    runtime: process
+    command: ["/bin/sh", "-c", 'echo "$FOO"']
+    envFromFile: vars.env
+    health:
+      cmd:
+        command: ["true"]
+`)
+	stackPath := filepath.Join(stackDir, "stack.yaml")
+	if err := os.WriteFile(stackPath, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := config.Load(stackPath)
+	if err != nil {
+		t.Fatalf("load stack: %v", err)
+	}
+
+	svc := doc.Services["worker"]
+	if svc == nil {
+		t.Fatalf("service worker missing")
+	}
+	if got := svc.Env["FOO"]; got != "from-env" {
+		t.Fatalf("env from file mismatch: got %q want %q", got, "from-env")
+	}
+
+	spec := runtimelib.StartSpec{
+		Name:    "worker",
+		Command: svc.Command,
+		Env:     svc.Env,
+		Workdir: svc.ResolvedWorkdir,
+		Health:  svc.Health,
+		Service: svc,
+	}
+
+	inst, err := New().Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("start service: %v", err)
+	}
+
+	logs, err := inst.Logs(context.Background())
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	if logs == nil {
+		t.Fatalf("logs channel is nil")
+	}
+
+	var message string
+	select {
+	case entry, ok := <-logs:
+		if !ok {
+			t.Fatalf("logs channel closed early")
+		}
+		message = strings.TrimSpace(entry.Message)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for log output")
+	}
+
+	if message != "from-env" {
+		t.Fatalf("process env mismatch: got %q want %q", message, "from-env")
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	if err := inst.Wait(waitCtx); err != nil {
+		t.Fatalf("process exited with error: %v", err)
 	}
 }
 
