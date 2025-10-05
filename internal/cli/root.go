@@ -70,6 +70,7 @@ type context struct {
 	deployment          *engine.Deployment
 	deploymentStackName string
 	tracker             *statusTracker
+	logStream           *eventStream
 }
 
 func (c *context) loadStack() (*cliutil.StackDocument, error) {
@@ -123,20 +124,151 @@ func (c *context) statusTracker() *statusTracker {
 	return c.tracker
 }
 
-func (c *context) trackEvents(events <-chan engine.Event, buffer int) <-chan engine.Event {
+func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan engine.Event, func()) {
 	tracker := c.statusTracker()
-	var out chan engine.Event
-	if buffer > 0 {
-		out = make(chan engine.Event, buffer)
-	} else {
-		out = make(chan engine.Event)
+	if buffer <= 0 {
+		buffer = 1
 	}
+
+	stream := newEventStream(buffer)
+
+	c.mu.Lock()
+	c.logStream = stream
+	c.mu.Unlock()
+
+	out := make(chan engine.Event, buffer)
 	go func() {
 		defer close(out)
+		defer stream.Close()
 		for evt := range events {
 			tracker.Apply(evt)
 			out <- evt
+			stream.Publish(evt)
 		}
+		c.mu.Lock()
+		if c.logStream == stream {
+			c.logStream = nil
+		}
+		c.mu.Unlock()
 	}()
-	return out
+
+	release := func() {
+		c.mu.Lock()
+		if c.logStream == stream {
+			c.logStream = nil
+		}
+		c.mu.Unlock()
+		stream.Close()
+	}
+
+	return out, release
+}
+
+func (c *context) subscribeLogStream(buffer int) (<-chan engine.Event, func(), bool) {
+	c.mu.RLock()
+	stream := c.logStream
+	c.mu.RUnlock()
+	if stream == nil {
+		return nil, nil, false
+	}
+	return stream.Subscribe(buffer)
+}
+
+type eventStream struct {
+	mu       sync.Mutex
+	closed   bool
+	subs     map[chan engine.Event]struct{}
+	backlog  []engine.Event
+	capacity int
+}
+
+func newEventStream(capacity int) *eventStream {
+	if capacity <= 0 {
+		capacity = 1
+	}
+	return &eventStream{
+		subs:     make(map[chan engine.Event]struct{}),
+		capacity: capacity,
+	}
+}
+
+func (s *eventStream) Subscribe(buffer int) (<-chan engine.Event, func(), bool) {
+	if buffer <= 0 {
+		buffer = 1
+	}
+	ch := make(chan engine.Event, buffer)
+
+	s.mu.Lock()
+	if s.closed {
+		close(ch)
+		s.mu.Unlock()
+		return ch, func() {}, false
+	}
+	backlog := append([]engine.Event(nil), s.backlog...)
+	if s.subs == nil {
+		s.subs = make(map[chan engine.Event]struct{})
+	}
+	s.subs[ch] = struct{}{}
+	s.mu.Unlock()
+
+	for _, evt := range backlog {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+
+	release := func() {
+		s.mu.Lock()
+		if s.subs != nil {
+			if _, ok := s.subs[ch]; ok {
+				delete(s.subs, ch)
+				close(ch)
+			}
+		}
+		s.mu.Unlock()
+	}
+
+	return ch, release, true
+}
+
+func (s *eventStream) Publish(evt engine.Event) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if evt.Type == engine.EventTypeLog {
+		s.backlog = append(s.backlog, evt)
+		if len(s.backlog) > s.capacity {
+			s.backlog = s.backlog[len(s.backlog)-s.capacity:]
+		}
+	}
+	subscribers := make([]chan engine.Event, 0, len(s.subs))
+	for ch := range s.subs {
+		subscribers = append(subscribers, ch)
+	}
+	s.mu.Unlock()
+
+	for _, ch := range subscribers {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+}
+
+func (s *eventStream) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	for ch := range s.subs {
+		close(ch)
+	}
+	s.subs = nil
+	s.backlog = nil
+	s.mu.Unlock()
 }

@@ -56,7 +56,7 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 	}()
 
 	events := make(chan engine.Event, 256)
-	trackedEvents := ctx.trackEvents(events, cap(events))
+	trackedEvents, releaseStream := ctx.trackEvents(events, cap(events))
 
 	var forwarder sync.WaitGroup
 	forwarder.Add(1)
@@ -84,6 +84,7 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 			cancel()
 			ctx.clearDeployment(deployment)
 		}
+		releaseStream()
 		close(events)
 		forwarder.Wait()
 		ui.CloseEvents()
@@ -117,7 +118,7 @@ func runUpInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocume
 
 func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
 	events := make(chan engine.Event, 64)
-	trackedEvents := ctx.trackEvents(events, cap(events))
+	trackedEvents, releaseStream := ctx.trackEvents(events, cap(events))
 	var printer sync.WaitGroup
 	printer.Add(1)
 	go func() {
@@ -143,6 +144,7 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 			cancel()
 			ctx.clearDeployment(deployment)
 		}
+		releaseStream()
 		close(events)
 		printer.Wait()
 	}()
