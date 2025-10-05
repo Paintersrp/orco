@@ -9,6 +9,7 @@ import (
 
 	"github.com/Paintersrp/orco/internal/engine"
 	runtimelib "github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 func TestLogsCommandStreamsStructuredOutput(t *testing.T) {
@@ -209,7 +210,7 @@ func startDeployment(t *testing.T, ctx *context) {
 	if err != nil {
 		t.Fatalf("start deployment: %v", err)
 	}
-	ctx.setDeployment(deployment, doc.File.Stack.Name)
+	ctx.setDeployment(deployment, doc.File.Stack.Name, stack.CloneServiceMap(doc.File.Services))
 
 	t.Cleanup(func() {
 		stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), time.Second)

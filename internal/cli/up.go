@@ -14,6 +14,7 @@ import (
 
 	"github.com/Paintersrp/orco/internal/cliutil"
 	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/stack"
 	"github.com/Paintersrp/orco/internal/tui"
 )
 
@@ -102,7 +103,7 @@ func runStackTUI(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (
 		return depErr
 	}
 
-	ctx.setDeployment(deployment, doc.File.Stack.Name)
+	ctx.setDeployment(deployment, doc.File.Stack.Name, stack.CloneServiceMap(doc.File.Services))
 
 	select {
 	case <-cmd.Context().Done():
@@ -157,7 +158,7 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 		return depErr
 	}
 
-	ctx.setDeployment(deployment, doc.File.Stack.Name)
+	ctx.setDeployment(deployment, doc.File.Stack.Name, stack.CloneServiceMap(doc.File.Services))
 
 	fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
 

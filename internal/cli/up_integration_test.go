@@ -332,26 +332,28 @@ func (i *blockingInstance) Logs(ctx stdcontext.Context) (<-chan runtime.LogEntry
 }
 
 type mockRuntime struct {
-	mu        sync.Mutex
-	starts    []string
-	readies   []string
-	stops     []string
-	readyCh   map[string][]chan struct{}
-	startErr  map[string]error
-	waitErr   map[string]error
-	stopErr   map[string]error
-	logs      map[string][]runtime.LogEntry
-	autoReady bool
+	mu          sync.Mutex
+	starts      []string
+	readies     []string
+	stops       []string
+	readyCh     map[string][]chan struct{}
+	startErr    map[string]error
+	waitErr     map[string]error
+	waitErrOnce map[string]error
+	stopErr     map[string]error
+	logs        map[string][]runtime.LogEntry
+	autoReady   bool
 }
 
 func newMockRuntime() *mockRuntime {
 	return &mockRuntime{
-		readyCh:   make(map[string][]chan struct{}),
-		startErr:  make(map[string]error),
-		waitErr:   make(map[string]error),
-		stopErr:   make(map[string]error),
-		logs:      make(map[string][]runtime.LogEntry),
-		autoReady: true,
+		readyCh:     make(map[string][]chan struct{}),
+		startErr:    make(map[string]error),
+		waitErr:     make(map[string]error),
+		waitErrOnce: make(map[string]error),
+		stopErr:     make(map[string]error),
+		logs:        make(map[string][]runtime.LogEntry),
+		autoReady:   true,
 	}
 }
 
@@ -419,6 +421,26 @@ func (m *mockRuntime) recordReady(name string) {
 	m.readies = append(m.readies, name)
 }
 
+func (m *mockRuntime) consumeWaitOnce(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	err := m.waitErrOnce[name]
+	if err != nil {
+		delete(m.waitErrOnce, name)
+	}
+	return err
+}
+
+func (m *mockRuntime) FailNextReady(name string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.waitErrOnce, name)
+		return
+	}
+	m.waitErrOnce[name] = err
+}
+
 func (m *mockRuntime) recordStop(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -458,6 +480,9 @@ func (i *mockInstance) WaitReady(ctx stdcontext.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-i.ready:
+		if onceErr := i.runtime.consumeWaitOnce(i.name); onceErr != nil {
+			return onceErr
+		}
 		if i.waitErr != nil {
 			return i.waitErr
 		}

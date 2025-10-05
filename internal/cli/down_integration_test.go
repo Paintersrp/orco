@@ -9,6 +9,7 @@ import (
 
 	"github.com/Paintersrp/orco/internal/engine"
 	"github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 func TestDownCommandStopsServicesInReverseOrder(t *testing.T) {
@@ -58,7 +59,7 @@ services:
 	if err != nil {
 		t.Fatalf("orchestrator up: %v", err)
 	}
-	ctx.setDeployment(deployment, doc.File.Stack.Name)
+	ctx.setDeployment(deployment, doc.File.Stack.Name, stack.CloneServiceMap(doc.File.Services))
 
 	cmd := newDownCmd(ctx)
 	var stdout, stderr bytes.Buffer
@@ -122,7 +123,7 @@ services:
 	if err != nil {
 		t.Fatalf("orchestrator up: %v", err)
 	}
-	ctx.setDeployment(deployment, doc.File.Stack.Name)
+	ctx.setDeployment(deployment, doc.File.Stack.Name, stack.CloneServiceMap(doc.File.Services))
 	rt.stopErr["api"] = errors.New("boom")
 
 	cmd := newDownCmd(ctx)
@@ -182,7 +183,7 @@ services:
 	if err != nil {
 		t.Fatalf("orchestrator up: %v", err)
 	}
-	ctx.setDeployment(deployment, doc.File.Stack.Name)
+	ctx.setDeployment(deployment, doc.File.Stack.Name, stack.CloneServiceMap(doc.File.Services))
 
 	initialStarts := rt.startOrder()
 	rt.startErr["db"] = errors.New("should not start")
