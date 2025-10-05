@@ -46,6 +46,19 @@ func (d *Deployment) Service(name string) (*Service, bool) {
 	return nil, false
 }
 
+// UpdateService performs a rolling update on the named service.
+func (d *Deployment) UpdateService(ctx context.Context, name string, spec *stack.Service) error {
+	if d == nil {
+		return fmt.Errorf("deployment is nil")
+	}
+	for _, handle := range d.handles {
+		if handle.name == name {
+			return handle.update(ctx, spec)
+		}
+	}
+	return fmt.Errorf("service %s is not part of the deployment", name)
+}
+
 // Name returns the service identifier associated with the handle.
 func (s *Service) Name() string {
 	if s == nil || s.handle == nil {
@@ -77,8 +90,17 @@ func (s *Service) RestartReplica(ctx context.Context, index int) error {
 	return replica.supervisor.Restart(ctx)
 }
 
+// Update performs a rolling update of the service using the provided specification.
+func (s *Service) Update(ctx context.Context, spec *stack.Service) error {
+	if s == nil || s.handle == nil {
+		return fmt.Errorf("service handle is nil")
+	}
+	return s.handle.update(ctx, spec)
+}
+
 type serviceHandle struct {
 	name     string
+	service  *stack.Service
 	replicas []*replicaHandle
 }
 
@@ -118,6 +140,31 @@ func (h *serviceHandle) awaitReady(ctx context.Context) error {
 	for _, replica := range h.replicas {
 		if err := replica.awaitReady(ctx); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) error {
+	if h == nil {
+		return fmt.Errorf("service handle is nil")
+	}
+	if svc == nil {
+		return fmt.Errorf("service %s spec is nil", h.name)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	clone := svc.Clone()
+	h.service = clone
+	for _, replica := range h.replicas {
+		if replica == nil || replica.supervisor == nil {
+			return fmt.Errorf("service %s replica %d supervisor unavailable", h.name, replica.index)
+		}
+		replica.supervisor.UpdateServiceSpec(clone)
+		if err := replica.supervisor.Restart(ctx); err != nil {
+			return fmt.Errorf("update service %s replica %d: %w", h.name, replica.index, err)
 		}
 	}
 	return nil
@@ -197,13 +244,15 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			replicaCount = 1
 		}
 
+		svcClone := svc.Clone()
+
 		replicas := make([]*replicaHandle, 0, replicaCount)
 		for idx := 0; idx < replicaCount; idx++ {
-			sup := newSupervisor(name, idx, svc, runtimeImpl, events)
+			sup := newSupervisor(name, idx, svcClone, runtimeImpl, events)
 			replicas = append(replicas, &replicaHandle{index: idx, supervisor: sup})
 		}
 
-		handles[name] = &serviceHandle{name: name, replicas: replicas}
+		handles[name] = &serviceHandle{name: name, service: svcClone, replicas: replicas}
 	}
 
 	deployment := &Deployment{handles: make([]*serviceHandle, 0, len(services))}

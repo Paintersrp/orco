@@ -37,10 +37,11 @@ type restartRequest struct {
 // instance. It runs the instance in a dedicated goroutine, observes readiness
 // transitions and initiates restarts based on the configured restart policy.
 type supervisor struct {
-	name    string
-	replica int
-	service *stack.Service
-	runtime runtime.Runtime
+	name      string
+	replica   int
+	serviceMu sync.RWMutex
+	service   *stack.Service
+	runtime   runtime.Runtime
 
 	events chan<- Event
 
@@ -77,7 +78,6 @@ func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runt
 	sup := &supervisor{
 		name:      name,
 		replica:   replica,
-		service:   svc,
 		runtime:   rt,
 		events:    events,
 		readyCh:   make(chan error, 1),
@@ -87,11 +87,38 @@ func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runt
 		restartCh: make(chan *restartRequest),
 	}
 
-	sup.policy = deriveRestartPolicy(svc)
 	sup.jitter = defaultJitter
 	sup.sleep = sleepWithContext
 
+	sup.UpdateServiceSpec(svc)
+
 	return sup
+}
+
+func (s *supervisor) UpdateServiceSpec(spec *stack.Service) {
+	s.serviceMu.Lock()
+	if spec == nil {
+		s.service = nil
+	} else {
+		s.service = spec.Clone()
+	}
+	s.policy = deriveRestartPolicy(s.service)
+	s.serviceMu.Unlock()
+}
+
+func (s *supervisor) serviceSpec() *stack.Service {
+	s.serviceMu.RLock()
+	defer s.serviceMu.RUnlock()
+	if s.service == nil {
+		return nil
+	}
+	return s.service.Clone()
+}
+
+func (s *supervisor) currentPolicy() restartPolicy {
+	s.serviceMu.RLock()
+	defer s.serviceMu.RUnlock()
+	return s.policy
 }
 
 func buildStartSpec(name string, replica int, svc *stack.Service) runtime.StartSpec {
@@ -265,7 +292,7 @@ func (s *supervisor) run() {
 	}()
 
 	restarts := 0
-	backoffBase := s.policy.min
+	backoffBase := s.currentPolicy().min
 
 	for {
 		if err := s.ctx.Err(); err != nil {
@@ -286,7 +313,7 @@ func (s *supervisor) run() {
 		}
 		sendEvent(s.events, s.name, s.replica, EventTypeStarting, "starting service", attempt, reason, nil)
 
-		spec := buildStartSpec(s.name, s.replica, s.service)
+		spec := buildStartSpec(s.name, s.replica, s.serviceSpec())
 		instance, err := s.runtime.Start(s.ctx, spec)
 		if err != nil {
 			if s.ctx.Err() != nil {
@@ -332,7 +359,7 @@ func (s *supervisor) run() {
 		if next != nil {
 			pending = next
 			restarts++
-			backoffBase = s.policy.min
+			backoffBase = s.currentPolicy().min
 			continue
 		}
 
@@ -383,24 +410,26 @@ func (s *supervisor) run() {
 }
 
 func (s *supervisor) allowRestart(restarts int) bool {
-	if s.policy.maxRetries < 0 {
+	pol := s.currentPolicy()
+	if pol.maxRetries < 0 {
 		return true
 	}
-	return restarts < s.policy.maxRetries
+	return restarts < pol.maxRetries
 }
 
 func (s *supervisor) sleepBackoff(base *time.Duration) error {
+	pol := s.currentPolicy()
 	delay := *base
 	if delay <= 0 {
-		delay = s.policy.min
+		delay = pol.min
 	}
-	if delay > s.policy.max {
-		delay = s.policy.max
+	if delay > pol.max {
+		delay = pol.max
 	}
 
 	jittered := s.jitter(delay)
-	if jittered > s.policy.max {
-		jittered = s.policy.max
+	if jittered > pol.max {
+		jittered = pol.max
 	}
 	if jittered < 0 {
 		jittered = 0
@@ -410,17 +439,17 @@ func (s *supervisor) sleepBackoff(base *time.Duration) error {
 		return err
 	}
 
-	next := float64(delay) * s.policy.factor
-	if math.IsInf(next, 0) || next > float64(s.policy.max) {
-		*base = s.policy.max
+	next := float64(delay) * pol.factor
+	if math.IsInf(next, 0) || next > float64(pol.max) {
+		*base = pol.max
 		return nil
 	}
 	n := time.Duration(next)
-	if n < s.policy.min {
-		n = s.policy.min
+	if n < pol.min {
+		n = pol.min
 	}
-	if n > s.policy.max {
-		n = s.policy.max
+	if n > pol.max {
+		n = pol.max
 	}
 	*base = n
 	return nil

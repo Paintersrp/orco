@@ -15,6 +15,7 @@ import (
 	"github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/runtime/docker"
 	"github.com/Paintersrp/orco/internal/runtime/process"
+	"github.com/Paintersrp/orco/internal/stack"
 )
 
 func NewRootCmd() *cobra.Command {
@@ -69,6 +70,7 @@ type context struct {
 	mu                  sync.RWMutex
 	deployment          *engine.Deployment
 	deploymentStackName string
+	deploymentStackSpec map[string]*stack.Service
 	tracker             *statusTracker
 	logStream           *eventStream
 }
@@ -87,11 +89,12 @@ func (c *context) getOrchestrator() *engine.Orchestrator {
 	return c.orchestrator
 }
 
-func (c *context) setDeployment(dep *engine.Deployment, stackName string) {
+func (c *context) setDeployment(dep *engine.Deployment, stackName string, services map[string]*stack.Service) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.deployment = dep
 	c.deploymentStackName = stackName
+	c.deploymentStackSpec = stack.CloneServiceMap(services)
 }
 
 func (c *context) clearDeployment(dep *engine.Deployment) {
@@ -100,6 +103,7 @@ func (c *context) clearDeployment(dep *engine.Deployment) {
 	if c.deployment == dep {
 		c.deployment = nil
 		c.deploymentStackName = ""
+		c.deploymentStackSpec = nil
 	}
 }
 
@@ -113,6 +117,15 @@ func (c *context) currentDeploymentInfo() (*engine.Deployment, string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.deployment, c.deploymentStackName
+}
+
+func (c *context) currentDeploymentSpec() map[string]*stack.Service {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.deploymentStackSpec) == 0 {
+		return nil
+	}
+	return stack.CloneServiceMap(c.deploymentStackSpec)
 }
 
 func (c *context) statusTracker() *statusTracker {
