@@ -189,15 +189,18 @@ func printEvents(stdout, stderr io.Writer, events <-chan engine.Event) {
 		case engine.EventTypeLog:
 			cliutil.EncodeLogEvent(encoder, stderr, event)
 		case engine.EventTypeError:
+			message := cliutil.RedactSecrets(event.Message)
 			if event.Err != nil {
-				fmt.Fprintf(stderr, "error: %s %s: %v\n", event.Service, event.Message, event.Err)
+				errMsg := cliutil.RedactSecrets(event.Err.Error())
+				fmt.Fprintf(stderr, "error: %s %s: %s\n", event.Service, message, errMsg)
 			} else {
-				fmt.Fprintf(stderr, "error: %s %s\n", event.Service, event.Message)
+				fmt.Fprintf(stderr, "error: %s %s\n", event.Service, message)
 			}
 		default:
 			label := formatEventType(event.Type)
 			if event.Message != "" {
-				fmt.Fprintf(stdout, "%s %s: %s\n", label, event.Service, event.Message)
+				message := cliutil.RedactSecrets(event.Message)
+				fmt.Fprintf(stdout, "%s %s: %s\n", label, event.Service, message)
 			} else {
 				fmt.Fprintf(stdout, "%s %s\n", label, event.Service)
 			}
