@@ -644,6 +644,138 @@ stopLoop:
 	}
 }
 
+func TestServiceUpdateSequentialReadiness(t *testing.T) {
+	apiInitial0 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiInitial1 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiUpdate0 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiUpdate1 := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {apiInitial0, apiInitial1, apiUpdate0, apiUpdate1},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 2,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 64)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for range events {
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected first replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected second replica start, got %s", name)
+	}
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator returned error before readiness: %v", err)
+		}
+		t.Fatalf("orchestrator completed before services became ready")
+	default:
+	}
+
+	apiInitial0.waitCh <- nil
+	apiInitial1.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment returned")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{Runtime: "test", Replicas: 2, Command: []string{"sleep", "1"}}
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[2]" {
+		t.Fatalf("expected first replica restart, got %s", name)
+	}
+
+	select {
+	case name := <-rt.startCh:
+		t.Fatalf("second replica restarted before readiness: %s", name)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	apiUpdate0.waitCh <- nil
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[3]" {
+		t.Fatalf("expected second replica restart after readiness, got %s", name)
+	}
+
+	apiUpdate1.waitCh <- nil
+
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatalf("service update failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for service update to complete")
+	}
+
+	select {
+	case name := <-rt.startCh:
+		t.Fatalf("unexpected additional restart: %s", name)
+	default:
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+}
+
 type recordingRuntime struct {
 	mu        sync.Mutex
 	instances map[string][]*fakeInstance
