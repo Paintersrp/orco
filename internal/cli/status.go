@@ -44,13 +44,20 @@ func newStatusCmd(ctx *context) *cobra.Command {
 						ageDur = ageDur.Truncate(time.Second)
 						age = ageDur.String()
 					}
+					readyState := "No"
 					if status.Ready {
-						ready = "Yes"
-					} else {
-						ready = "No"
+						readyState = "Yes"
 					}
-					if status.Replicas > 0 {
-						replicas = fmt.Sprintf("%d", status.Replicas)
+					totalReplicas := status.Replicas
+					if totalReplicas > 0 {
+						readyReplicas := status.ReadyReplicas
+						if readyReplicas > totalReplicas {
+							readyReplicas = totalReplicas
+						}
+						ready = fmt.Sprintf("%s (%d/%d)", readyState, readyReplicas, totalReplicas)
+						replicas = fmt.Sprintf("%d", totalReplicas)
+					} else {
+						ready = readyState
 					}
 					restarts = status.Restarts
 					if status.Message != "" {
