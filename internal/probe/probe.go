@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Paintersrp/orco/internal/stack"
@@ -41,21 +42,100 @@ type Prober interface {
 	Probe(ctx context.Context) error
 }
 
+// LogEntry represents a single log line observed by a log-aware probe.
+type LogEntry struct {
+	Message string
+	Source  string
+	Level   string
+}
+
+// LogObserver consumes log entries surfaced by runtimes to drive readiness
+// evaluations.
+type LogObserver interface {
+	ObserveLog(LogEntry)
+}
+
+type readyReporter interface {
+	Ready() bool
+}
+
 // New constructs an implementation of Prober for the supplied specification.
 func New(spec *stack.Health) (Prober, error) {
 	if spec == nil {
 		return nil, nil
 	}
-	switch {
-	case spec.HTTP != nil:
-		return newHTTPProber(spec.HTTP), nil
-	case spec.TCP != nil:
-		return newTCPProber(spec.TCP), nil
-	case spec.Command != nil:
-		return newCommandProber(spec.Command)
-	default:
+	probes := make(map[string]Prober, 4)
+
+	if spec.HTTP != nil {
+		probes["http"] = newHTTPProber(spec.HTTP)
+	}
+	if spec.TCP != nil {
+		probes["tcp"] = newTCPProber(spec.TCP)
+	}
+	if spec.Command != nil {
+		prober, err := newCommandProber(spec.Command)
+		if err != nil {
+			return nil, err
+		}
+		probes["cmd"] = prober
+	}
+	if spec.Log != nil {
+		prober, err := newLogProber(spec.Log)
+		if err != nil {
+			return nil, err
+		}
+		probes["log"] = prober
+	}
+
+	if len(probes) == 0 {
 		return nil, errors.New("probe: missing configuration")
 	}
+
+	order, err := resolveProbeOrder(spec.Expression, probes)
+	if err != nil {
+		return nil, err
+	}
+	if len(order) == 1 {
+		return probes[order[0]], nil
+	}
+	return newMultiProber(order, probes), nil
+}
+
+func resolveProbeOrder(expression string, probes map[string]Prober) ([]string, error) {
+	if strings.TrimSpace(expression) == "" {
+		order := make([]string, 0, len(probes))
+		for _, alias := range []string{"http", "tcp", "cmd", "log"} {
+			if _, ok := probes[alias]; ok {
+				order = append(order, alias)
+			}
+		}
+		if len(order) == 0 {
+			return nil, errors.New("probe: missing configuration")
+		}
+		return order, nil
+	}
+
+	tokens, err := parseExpression(expression)
+	if err != nil {
+		return nil, fmt.Errorf("probe: %w", err)
+	}
+
+	order := make([]string, 0, len(tokens))
+	seen := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		if _, ok := probes[token]; !ok {
+			return nil, fmt.Errorf("probe: expression references undefined probe %q", token)
+		}
+		if _, dup := seen[token]; dup {
+			continue
+		}
+		seen[token] = struct{}{}
+		order = append(order, token)
+	}
+	if len(order) == 0 {
+		return nil, errors.New("probe: missing probes in expression")
+	}
+	return order, nil
 }
 
 // Watch continuously executes the provided prober until the context is
@@ -188,4 +268,117 @@ func probeTimeout(spec *stack.Health) time.Duration {
 		}
 	}
 	return spec.Timeout.Duration
+}
+
+type multiProber struct {
+	terms     []probeTerm
+	observers []LogObserver
+}
+
+type probeTerm struct {
+	alias string
+	probe Prober
+	ready readyReporter
+}
+
+func newMultiProber(order []string, probes map[string]Prober) Prober {
+	terms := make([]probeTerm, 0, len(order))
+	observers := make([]LogObserver, 0, len(order))
+	for _, alias := range order {
+		prober := probes[alias]
+		term := probeTerm{alias: alias, probe: prober}
+		if rr, ok := prober.(readyReporter); ok {
+			term.ready = rr
+		}
+		if observer, ok := prober.(LogObserver); ok {
+			observers = append(observers, observer)
+		}
+		terms = append(terms, term)
+	}
+	return &multiProber{terms: terms, observers: observers}
+}
+
+func (m *multiProber) ObserveLog(entry LogEntry) {
+	for _, observer := range m.observers {
+		observer.ObserveLog(entry)
+	}
+}
+
+func (m *multiProber) Probe(ctx context.Context) error {
+	for _, term := range m.terms {
+		if term.ready != nil && term.ready.Ready() {
+			return nil
+		}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type result struct {
+		alias string
+		err   error
+	}
+
+	results := make(chan result, len(m.terms))
+	for _, term := range m.terms {
+		go func(alias string, prober Prober) {
+			err := prober.Probe(ctx)
+			results <- result{alias: alias, err: err}
+		}(term.alias, term.probe)
+	}
+
+	var errs []error
+	for i := 0; i < len(m.terms); i++ {
+		select {
+		case <-ctx.Done():
+			if ctxErr := ctx.Err(); ctxErr != nil && len(errs) == 0 {
+				return ctxErr
+			}
+		case res := <-results:
+			if res.err == nil {
+				cancel()
+				return nil
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", res.alias, res.err))
+		}
+	}
+
+	if len(errs) == 0 {
+		return errors.New("no probes executed")
+	}
+	return errors.Join(errs...)
+}
+
+func parseExpression(expr string) ([]string, error) {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return nil, errors.New("expression is empty")
+	}
+	tokens := strings.Fields(trimmed)
+	if len(tokens) == 0 {
+		return nil, errors.New("expression is empty")
+	}
+	expectProbe := true
+	refs := make([]string, 0, (len(tokens)+1)/2)
+	for _, token := range tokens {
+		lower := strings.ToLower(token)
+		if expectProbe {
+			switch lower {
+			case "http", "tcp", "cmd", "log":
+				refs = append(refs, lower)
+				expectProbe = false
+			default:
+				return nil, fmt.Errorf("invalid probe reference %q", token)
+			}
+			continue
+		}
+		if lower != "or" && token != "||" {
+			return nil, fmt.Errorf("unsupported operator %q", token)
+		}
+		expectProbe = true
+	}
+	if expectProbe {
+		return nil, errors.New("expression is incomplete")
+	}
+	return refs, nil
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Paintersrp/orco/internal/config"
 	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/probe"
 	runtimelib "github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/stack"
 )
@@ -181,6 +182,69 @@ func TestWaitReadyBlocksUntilProbeSuccess(t *testing.T) {
 	}, 2*time.Second)
 	if dbReadyAgain.Err != nil {
 		t.Fatalf("db re-ready event returned error: %v", dbReadyAgain.Err)
+	}
+}
+
+func TestWaitReadyWithLogExpression(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("process runtime tests skipped on windows")
+	}
+
+	rt := New()
+
+	health := &stack.Health{
+		GracePeriod:      stack.Duration{Duration: 200 * time.Millisecond},
+		Interval:         stack.Duration{Duration: 30 * time.Millisecond},
+		Timeout:          stack.Duration{Duration: 120 * time.Millisecond},
+		FailureThreshold: 3,
+		SuccessThreshold: 1,
+		HTTP: &stack.HTTPProbe{
+			URL: "http://127.0.0.1:65535",
+		},
+		Log: &stack.LogProbe{
+			Pattern: "ready",
+			Sources: []string{runtimelib.LogSourceStdout},
+		},
+		Expression: "http || log",
+	}
+
+	cmd := []string{"/bin/sh", "-c", "echo booting; sleep 0.05; echo ready; sleep 1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	inst, err := rt.Start(ctx, runtimelib.StartSpec{
+		Name:    "log-probe",
+		Command: cmd,
+		Health:  health,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		if err := inst.Stop(stopCtx); err != nil {
+			t.Logf("stop returned error: %v", err)
+		}
+	}()
+
+	if err := inst.WaitReady(ctx); err != nil {
+		t.Fatalf("wait ready: %v", err)
+	}
+
+	healthCh := inst.Health()
+	if healthCh == nil {
+		t.Fatalf("expected health channel")
+	}
+
+	select {
+	case evt := <-healthCh:
+		if evt.Status != probe.StatusReady {
+			t.Fatalf("expected ready status, got %v", evt.Status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected ready event")
 	}
 }
 

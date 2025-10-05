@@ -118,6 +118,68 @@ func TestRuntimeStartStopLogs(t *testing.T) {
 	}
 }
 
+func TestRuntimeWaitReadyWithLogExpression(t *testing.T) {
+	requireDocker(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	rt := New()
+
+	health := &stack.Health{
+		GracePeriod:      stack.Duration{Duration: 200 * time.Millisecond},
+		Interval:         stack.Duration{Duration: 50 * time.Millisecond},
+		Timeout:          stack.Duration{Duration: 150 * time.Millisecond},
+		FailureThreshold: 3,
+		SuccessThreshold: 1,
+		HTTP: &stack.HTTPProbe{
+			URL: "http://127.0.0.1:65535",
+		},
+		Log: &stack.LogProbe{
+			Pattern: "ready",
+			Sources: []string{runtime.LogSourceStdout},
+		},
+		Expression: "http || log",
+	}
+
+	spec := runtime.StartSpec{
+		Name:    "log-ready",
+		Image:   "ghcr.io/library/alpine:3.19",
+		Command: []string{"sh", "-c", "echo booting; sleep 0.05; echo ready; sleep 1"},
+		Health:  health,
+	}
+
+	inst, err := rt.Start(ctx, spec)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stopCancel()
+		if err := inst.Stop(stopCtx); err != nil {
+			t.Logf("stop returned error: %v", err)
+		}
+	}()
+
+	if err := inst.WaitReady(ctx); err != nil {
+		t.Fatalf("wait ready: %v", err)
+	}
+
+	healthCh := inst.Health()
+	if healthCh == nil {
+		t.Fatalf("expected health channel")
+	}
+
+	select {
+	case evt := <-healthCh:
+		if evt.Status != probe.StatusReady {
+			t.Fatalf("expected ready event, got %v", evt.Status)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("expected ready event")
+	}
+}
+
 func TestRuntimeEnvFromFile(t *testing.T) {
 	requireDocker(t)
 
