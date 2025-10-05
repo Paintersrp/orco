@@ -78,12 +78,22 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, dep *engine.Deployment, o
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Updating %s (%d replicas)\n", name, replicas)
 		updated = append(updated, name)
-		if err := service.Update(cmd.Context(), svcSpec); err != nil {
+
+		updateErr, promoteErr := runServiceUpdate(cmd.Context(), service, svcSpec)
+
+		if updateErr != nil {
 			rollbackErr := rollbackUpdates(cmd.Context(), dep, oldSpec, updated)
 			if rollbackErr != nil {
-				return fmt.Errorf("update %s failed: %v (rollback error: %v)", name, err, rollbackErr)
+				return fmt.Errorf("update %s failed: %v (rollback error: %v)", name, updateErr, rollbackErr)
 			}
-			return fmt.Errorf("update %s failed: %w", name, err)
+			return fmt.Errorf("update %s failed: %w", name, updateErr)
+		}
+		if promoteErr != nil && !errors.Is(promoteErr, engine.ErrNoPromotionPending) {
+			rollbackErr := rollbackUpdates(cmd.Context(), dep, oldSpec, updated)
+			if rollbackErr != nil {
+				return fmt.Errorf("promote %s failed: %v (rollback error: %v)", name, promoteErr, rollbackErr)
+			}
+			return fmt.Errorf("promote %s failed: %w", name, promoteErr)
 		}
 
 		status := tracker.Snapshot()[name]
@@ -125,9 +135,43 @@ func rollbackUpdates(ctx stdcontext.Context, dep *engine.Deployment, oldSpec map
 			errs = append(errs, fmt.Errorf("rollback %s: service no longer running", name))
 			continue
 		}
-		if err := service.Update(ctx, spec); err != nil {
-			errs = append(errs, fmt.Errorf("rollback %s: %w", name, err))
+		updateErr, promoteErr := runServiceUpdate(ctx, service, spec)
+		if updateErr != nil {
+			errs = append(errs, fmt.Errorf("rollback %s: %w", name, updateErr))
+			continue
+		}
+		if promoteErr != nil && !errors.Is(promoteErr, engine.ErrNoPromotionPending) {
+			errs = append(errs, fmt.Errorf("rollback %s: %w", name, promoteErr))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func runServiceUpdate(ctx stdcontext.Context, service *engine.Service, spec *stack.Service) (updateErr, promoteErr error) {
+	updateErrCh := make(chan error, 1)
+	updateDone := make(chan struct{})
+	go func() {
+		updateErrCh <- service.Update(ctx, spec)
+		close(updateDone)
+	}()
+
+promoteLoop:
+	for {
+		promoteErr = service.Promote(ctx)
+		if !errors.Is(promoteErr, engine.ErrNoPromotionPending) {
+			break
+		}
+		select {
+		case <-updateDone:
+			promoteErr = nil
+			break promoteLoop
+		case <-ctx.Done():
+			promoteErr = ctx.Err()
+			break promoteLoop
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	updateErr = <-updateErrCh
+	return updateErr, promoteErr
 }

@@ -17,6 +17,9 @@ type Orchestrator struct {
 	runtimes runtime.Registry
 }
 
+// ErrNoPromotionPending indicates that a service is not waiting on a manual promotion signal.
+var ErrNoPromotionPending = errors.New("service has no pending promotion")
+
 // NewOrchestrator constructs an orchestrator backed by the provided runtime
 // registry.
 func NewOrchestrator(reg runtime.Registry) *Orchestrator {
@@ -54,6 +57,19 @@ func (d *Deployment) UpdateService(ctx context.Context, name string, spec *stack
 	for _, handle := range d.handles {
 		if handle.name == name {
 			return handle.update(ctx, spec)
+		}
+	}
+	return fmt.Errorf("service %s is not part of the deployment", name)
+}
+
+// PromoteService signals the orchestrator to continue a pending canary rollout for the named service.
+func (d *Deployment) PromoteService(ctx context.Context, name string) error {
+	if d == nil {
+		return fmt.Errorf("deployment is nil")
+	}
+	for _, handle := range d.handles {
+		if handle.name == name {
+			return handle.promote(ctx)
 		}
 	}
 	return fmt.Errorf("service %s is not part of the deployment", name)
@@ -98,11 +114,28 @@ func (s *Service) Update(ctx context.Context, spec *stack.Service) error {
 	return s.handle.update(ctx, spec)
 }
 
+// Promote continues a pending canary rollout for the service.
+func (s *Service) Promote(ctx context.Context) error {
+	if s == nil || s.handle == nil {
+		return fmt.Errorf("service handle is nil")
+	}
+	return s.handle.promote(ctx)
+}
+
 type serviceHandle struct {
 	name     string
 	service  *stack.Service
 	replicas []*replicaHandle
+
+	events chan<- Event
+
+	controllerMu sync.Mutex
+	controller   *updateController
+
+	updateMu sync.Mutex
 }
+
+const promotionRollbackTimeout = 5 * time.Second
 
 type replicaHandle struct {
 	index      int
@@ -145,7 +178,7 @@ func (h *serviceHandle) awaitReady(ctx context.Context) error {
 	return nil
 }
 
-func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) error {
+func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) (retErr error) {
 	if h == nil {
 		return fmt.Errorf("service handle is nil")
 	}
@@ -156,17 +189,69 @@ func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) error {
 		ctx = context.Background()
 	}
 
-	clone := svc.Clone()
-	h.service = clone
-	for _, replica := range h.replicas {
+	h.updateMu.Lock()
+	defer h.updateMu.Unlock()
+
+	if len(h.replicas) == 0 {
+		h.service = svc.Clone()
+		return nil
+	}
+
+	controller := newUpdateController()
+	if err := h.installController(controller); err != nil {
+		return err
+	}
+	defer func() {
+		controller.finish(retErr)
+		h.clearController(controller)
+	}()
+
+	newSpec := svc.Clone()
+	var previous *stack.Service
+	if h.service != nil {
+		previous = h.service.Clone()
+	}
+
+	canary := h.replicas[0]
+	if canary == nil || canary.supervisor == nil {
+		return fmt.Errorf("service %s replica %d supervisor unavailable", h.name, 0)
+	}
+
+	updated := make([]*replicaHandle, 0, len(h.replicas))
+	updated = append(updated, canary)
+
+	canary.supervisor.UpdateServiceSpec(newSpec)
+	if err := canary.supervisor.Restart(ctx); err != nil {
+		retErr = h.abortUpdate(updated, previous, err)
+		return retErr
+	}
+
+	sendEvent(h.events, h.name, canary.index, EventTypeCanary, "canary replica ready", 0, ReasonCanary, nil)
+
+	if promoteAfter := promoteAfterDuration(newSpec); promoteAfter > 0 {
+		controller.startAutoPromote(promoteAfter)
+	}
+
+	if err := controller.wait(ctx); err != nil {
+		retErr = h.abortUpdate(updated, previous, err)
+		return retErr
+	}
+
+	for _, replica := range h.replicas[1:] {
 		if replica == nil || replica.supervisor == nil {
-			return fmt.Errorf("service %s replica %d supervisor unavailable", h.name, replica.index)
+			retErr = h.abortUpdate(updated, previous, fmt.Errorf("service %s replica %d supervisor unavailable", h.name, replica.index))
+			return retErr
 		}
-		replica.supervisor.UpdateServiceSpec(clone)
+		replica.supervisor.UpdateServiceSpec(newSpec)
+		updated = append(updated, replica)
 		if err := replica.supervisor.Restart(ctx); err != nil {
-			return fmt.Errorf("update service %s replica %d: %w", h.name, replica.index, err)
+			retErr = h.abortUpdate(updated, previous, err)
+			return retErr
 		}
 	}
+
+	h.service = newSpec
+	sendEvent(h.events, h.name, -1, EventTypePromoted, "promotion complete", 0, ReasonPromoted, nil)
 	return nil
 }
 
@@ -212,6 +297,152 @@ func (r *replicaHandle) awaitReady(ctx context.Context) error {
 	return r.readyErr
 }
 
+func (h *serviceHandle) abortUpdate(updated []*replicaHandle, previous *stack.Service, cause error) error {
+	if previous != nil && len(updated) > 0 {
+		h.rollback(updated, previous)
+	}
+	replicaIdx := -1
+	if len(updated) > 0 && updated[0] != nil {
+		replicaIdx = updated[0].index
+	}
+	sendEvent(h.events, h.name, replicaIdx, EventTypeAborted, "promotion aborted", 0, ReasonAborted, cause)
+	return fmt.Errorf("service %s promotion failed: %w", h.name, cause)
+}
+
+func (h *serviceHandle) rollback(replicas []*replicaHandle, previous *stack.Service) {
+	if previous == nil {
+		return
+	}
+	for _, replica := range replicas {
+		if replica == nil || replica.supervisor == nil {
+			continue
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), promotionRollbackTimeout)
+		replica.supervisor.UpdateServiceSpec(previous)
+		_ = replica.supervisor.Restart(rollbackCtx)
+		cancel()
+	}
+}
+
+func promoteAfterDuration(spec *stack.Service) time.Duration {
+	if spec == nil || spec.Update == nil {
+		return 0
+	}
+	if spec.Update.PromoteAfter.Duration <= 0 {
+		return 0
+	}
+	return spec.Update.PromoteAfter.Duration
+}
+
+func (h *serviceHandle) installController(ctrl *updateController) error {
+	h.controllerMu.Lock()
+	defer h.controllerMu.Unlock()
+	if h.controller != nil {
+		return fmt.Errorf("service %s update already in progress", h.name)
+	}
+	h.controller = ctrl
+	return nil
+}
+
+func (h *serviceHandle) clearController(ctrl *updateController) {
+	h.controllerMu.Lock()
+	if h.controller == ctrl {
+		h.controller = nil
+	}
+	h.controllerMu.Unlock()
+}
+
+func (h *serviceHandle) promote(ctx context.Context) error {
+	if h == nil {
+		return fmt.Errorf("service handle is nil")
+	}
+	h.controllerMu.Lock()
+	controller := h.controller
+	h.controllerMu.Unlock()
+	if controller == nil {
+		return fmt.Errorf("service %s has no pending promotion: %w", h.name, ErrNoPromotionPending)
+	}
+	return controller.promote(ctx)
+}
+
+type updateController struct {
+	promoteCh   chan struct{}
+	done        chan struct{}
+	triggerOnce sync.Once
+	finishOnce  sync.Once
+
+	mu  sync.Mutex
+	err error
+}
+
+func newUpdateController() *updateController {
+	return &updateController{
+		promoteCh: make(chan struct{}),
+		done:      make(chan struct{}),
+	}
+}
+
+func (c *updateController) startAutoPromote(d time.Duration) {
+	go func() {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			c.trigger()
+		case <-c.promoteCh:
+		case <-c.done:
+		}
+	}()
+}
+
+func (c *updateController) wait(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.promoteCh:
+		return nil
+	case <-c.done:
+		return c.Err()
+	}
+}
+
+func (c *updateController) trigger() {
+	c.triggerOnce.Do(func() {
+		close(c.promoteCh)
+	})
+}
+
+func (c *updateController) promote(ctx context.Context) error {
+	c.trigger()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-c.done:
+		return c.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *updateController) finish(err error) {
+	c.finishOnce.Do(func() {
+		c.mu.Lock()
+		c.err = err
+		c.mu.Unlock()
+		close(c.done)
+	})
+}
+
+func (c *updateController) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
 // Up launches services described by the stack in topological order. Events are
 // delivered to the supplied channel. The returned deployment must be stopped by
 // the caller to release resources.
@@ -252,7 +483,7 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 			replicas = append(replicas, &replicaHandle{index: idx, supervisor: sup})
 		}
 
-		handles[name] = &serviceHandle{name: name, service: svcClone, replicas: replicas}
+		handles[name] = &serviceHandle{name: name, service: svcClone, replicas: replicas, events: events}
 	}
 
 	deployment := &Deployment{handles: make([]*serviceHandle, 0, len(services))}
