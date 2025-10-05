@@ -14,6 +14,7 @@ type (
 	HTTPProbe     = config.HTTPProbeSpec
 	TCPProbe      = config.TCPProbeSpec
 	CommandProbe  = config.CommandProbe
+	LogProbe      = config.LogProbeSpec
 	UpdatePolicy  = config.UpdateStrategy
 	RestartPolicy = config.RestartPolicy
 	Backoff       = config.BackoffSpec

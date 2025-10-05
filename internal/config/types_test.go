@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidatePortSuccess(t *testing.T) {
@@ -91,5 +92,104 @@ func TestValidateVolumeSpecFailures(t *testing.T) {
 				t.Fatalf("unexpected error for %q: got %q want substring %q", tc.spec, err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateProbeAllowsHTTPAndLogWithExpression(t *testing.T) {
+	probe := &ProbeSpec{
+		HTTP:       &HTTPProbeSpec{URL: "http://localhost:8080/health"},
+		Log:        &LogProbeSpec{Pattern: "ready"},
+		Expression: "http || log",
+	}
+	if err := validateProbe("api", probe); err != nil {
+		t.Fatalf("validateProbe returned error: %v", err)
+	}
+	if got, want := probe.FailureThreshold, 3; got != want {
+		t.Fatalf("failure threshold default mismatch: got %d want %d", got, want)
+	}
+}
+
+func TestValidateProbeRequiresExpressionForMultipleProbes(t *testing.T) {
+	probe := &ProbeSpec{
+		HTTP: &HTTPProbeSpec{URL: "http://localhost:8080/health"},
+		Log:  &LogProbeSpec{Pattern: "ready"},
+	}
+	err := validateProbe("api", probe)
+	if err == nil || !strings.Contains(err.Error(), "expression") {
+		t.Fatalf("expected expression error, got %v", err)
+	}
+}
+
+func TestValidateProbeLogPatternMustBeValidRegex(t *testing.T) {
+	probe := &ProbeSpec{
+		Log: &LogProbeSpec{Pattern: "("},
+	}
+	err := validateProbe("api", probe)
+	if err == nil || !strings.Contains(err.Error(), "invalid pattern") {
+		t.Fatalf("expected invalid pattern error, got %v", err)
+	}
+}
+
+func TestValidateProbeExpressionMustReferenceConfiguredProbe(t *testing.T) {
+	probe := &ProbeSpec{
+		HTTP:       &HTTPProbeSpec{URL: "http://localhost:8080/health"},
+		Expression: "http || tcp",
+	}
+	err := validateProbe("api", probe)
+	if err == nil || !strings.Contains(err.Error(), "undefined probe \"tcp\"") {
+		t.Fatalf("expected undefined probe error, got %v", err)
+	}
+}
+
+func TestParseProbeExpression(t *testing.T) {
+	refs, err := parseProbeExpression("http or log or cmd")
+	if err != nil {
+		t.Fatalf("parseProbeExpression returned error: %v", err)
+	}
+	want := []string{"http", "log", "cmd"}
+	if len(refs) != len(want) {
+		t.Fatalf("unexpected refs length: got %d want %d", len(refs), len(want))
+	}
+	for i := range want {
+		if refs[i] != want[i] {
+			t.Fatalf("unexpected ref at %d: got %q want %q", i, refs[i], want[i])
+		}
+	}
+}
+
+func TestParseProbeExpressionErrors(t *testing.T) {
+	cases := map[string]string{
+		"":               "empty",
+		"http and log":   "unsupported operator",
+		"http ||":        "incomplete",
+		"unknown or log": "invalid probe reference",
+	}
+	for expr, want := range cases {
+		_, err := parseProbeExpression(expr)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("parseProbeExpression(%q) error = %v, want substring %q", expr, err, want)
+		}
+	}
+}
+
+func TestProbeApplyDefaultsCopiesLogAndExpression(t *testing.T) {
+	defaults := &ProbeSpec{
+		Interval:   Duration{Duration: time.Second},
+		Log:        &LogProbeSpec{Pattern: "ready", Sources: []string{"stderr"}},
+		Expression: "http || log",
+	}
+	probe := &ProbeSpec{}
+	probe.ApplyDefaults(defaults)
+	if probe.Log == nil {
+		t.Fatalf("expected log defaults to be applied")
+	}
+	if probe.Log.Pattern != "ready" {
+		t.Fatalf("unexpected pattern: got %q want %q", probe.Log.Pattern, "ready")
+	}
+	if got, want := probe.Expression, defaults.Expression; got != want {
+		t.Fatalf("unexpected expression: got %q want %q", got, want)
+	}
+	if len(probe.Log.Sources) != 1 || probe.Log.Sources[0] != "stderr" {
+		t.Fatalf("unexpected sources: %#v", probe.Log.Sources)
 	}
 }
