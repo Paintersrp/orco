@@ -63,6 +63,9 @@ services:
 	if !strings.Contains(apiLine, "Yes") {
 		t.Fatalf("expected api line to show ready=Yes, got: %s", apiLine)
 	}
+	if !strings.Contains(apiLine, "1/1") {
+		t.Fatalf("expected api line to include replica readiness, got: %s", apiLine)
+	}
 	if !strings.Contains(apiLine, "service ready") {
 		t.Fatalf("expected api ready message, got: %s", apiLine)
 	}
@@ -70,6 +73,9 @@ services:
 	dbLine := findServiceLine(output, "db")
 	if !strings.Contains(dbLine, "Ready") {
 		t.Fatalf("expected db to remain ready, got: %s", dbLine)
+	}
+	if !strings.Contains(dbLine, "1/1") {
+		t.Fatalf("expected db line to include replica readiness, got: %s", dbLine)
 	}
 }
 
