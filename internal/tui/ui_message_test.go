@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Paintersrp/orco/internal/engine"
 )
@@ -56,5 +57,54 @@ func TestFormatEventMessage(t *testing.T) {
 				t.Fatalf("formatEventMessage() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFormatEventMessageRedactsSecrets(t *testing.T) {
+	evt := engine.Event{
+		Message: "loading ${TOKEN}",
+		Err:     errors.New("API_KEY=abcd"),
+	}
+
+	want := "loading ${[redacted]}: API_KEY=[redacted]"
+	if got := formatEventMessage(evt); got != want {
+		t.Fatalf("formatEventMessage() = %q, want %q", got, want)
+	}
+}
+
+func TestApplyEventLockedRedactsServiceEvents(t *testing.T) {
+	ui := newTestUI(t)
+
+	evt := engine.Event{
+		Timestamp: time.Now(),
+		Service:   "api",
+		Replica:   -1,
+		Type:      engine.EventTypeFailed,
+		Message:   "loading ${TOKEN}",
+		Err:       errors.New("API_KEY=abcd"),
+	}
+
+	ui.applyEventLocked(evt)
+
+	state := ui.services["api"]
+	if state == nil {
+		t.Fatalf("expected service state to be created")
+	}
+
+	wantMessage := "loading ${[redacted]}: API_KEY=[redacted]"
+	if state.message != wantMessage {
+		t.Fatalf("state message = %q, want %q", state.message, wantMessage)
+	}
+
+	if len(state.events) != 1 {
+		t.Fatalf("expected one service event, got %d", len(state.events))
+	}
+
+	record := state.events[0]
+	if record.Message != "loading ${[redacted]}" {
+		t.Fatalf("record.Message = %q, want %q", record.Message, "loading ${[redacted]}")
+	}
+	if record.Error != "API_KEY=[redacted]" {
+		t.Fatalf("record.Error = %q, want %q", record.Error, "API_KEY=[redacted]")
 	}
 }

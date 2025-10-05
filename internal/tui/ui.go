@@ -439,7 +439,7 @@ func (u *UI) applyEventLocked(evt engine.Event) bool {
 		} else if evt.Replica >= 0 && msg == "" {
 			msg = fmt.Sprintf("replica %d", evt.Replica)
 		}
-		state.message = msg
+		state.message = cliutil.RedactSecrets(msg)
 	}
 
 	if evt.Replica >= 0 {
@@ -477,13 +477,13 @@ func (u *UI) applyEventLocked(evt engine.Event) bool {
 		record.Level = evt.Level
 	}
 	if evt.Message != "" {
-		record.Message = evt.Message
+		record.Message = cliutil.RedactSecrets(evt.Message)
 	}
 	if evt.Source != "" {
 		record.Source = evt.Source
 	}
 	if evt.Err != nil {
-		record.Error = evt.Err.Error()
+		record.Error = cliutil.RedactSecrets(evt.Err.Error())
 	}
 	if evt.Type == engine.EventTypeLog {
 		logRecord := cliutil.NewLogRecord(evt)
@@ -534,10 +534,10 @@ func (s *serviceState) aggregate() {
 func formatEventMessage(evt engine.Event) string {
 	var parts []string
 	if evt.Message != "" {
-		parts = append(parts, evt.Message)
+		parts = append(parts, cliutil.RedactSecrets(evt.Message))
 	}
 	if evt.Err != nil {
-		parts = append(parts, evt.Err.Error())
+		parts = append(parts, cliutil.RedactSecrets(evt.Err.Error()))
 	}
 
 	message := strings.Join(parts, ": ")
@@ -549,7 +549,7 @@ func formatEventMessage(evt engine.Event) string {
 		}
 	}
 
-	return message
+	return cliutil.RedactSecrets(message)
 }
 
 func (u *UI) refreshAge() {
