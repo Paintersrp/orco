@@ -336,7 +336,7 @@ type mockRuntime struct {
 	starts    []string
 	readies   []string
 	stops     []string
-	readyCh   map[string]chan struct{}
+	readyCh   map[string][]chan struct{}
 	startErr  map[string]error
 	waitErr   map[string]error
 	stopErr   map[string]error
@@ -346,7 +346,7 @@ type mockRuntime struct {
 
 func newMockRuntime() *mockRuntime {
 	return &mockRuntime{
-		readyCh:   make(map[string]chan struct{}),
+		readyCh:   make(map[string][]chan struct{}),
 		startErr:  make(map[string]error),
 		waitErr:   make(map[string]error),
 		stopErr:   make(map[string]error),
@@ -364,7 +364,7 @@ func (m *mockRuntime) Start(ctx stdcontext.Context, spec runtime.StartSpec) (run
 	}
 	m.starts = append(m.starts, name)
 	readyCh := make(chan struct{})
-	m.readyCh[name] = readyCh
+	m.readyCh[name] = append(m.readyCh[name], readyCh)
 	waitErr := m.waitErr[name]
 	stopErr := m.stopErr[name]
 	logLines := append([]runtime.LogEntry(nil), m.logs[name]...)
@@ -397,12 +397,18 @@ func (m *mockRuntime) Start(ctx stdcontext.Context, spec runtime.StartSpec) (run
 
 func (m *mockRuntime) SignalReady(name string) {
 	m.mu.Lock()
-	ch, ok := m.readyCh[name]
-	if ok {
-		delete(m.readyCh, name)
+	queue := m.readyCh[name]
+	var ch chan struct{}
+	if len(queue) > 0 {
+		ch = queue[0]
+		if len(queue) == 1 {
+			delete(m.readyCh, name)
+		} else {
+			m.readyCh[name] = queue[1:]
+		}
 	}
 	m.mu.Unlock()
-	if ok {
+	if ch != nil {
 		close(ch)
 	}
 }

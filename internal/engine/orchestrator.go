@@ -31,6 +31,52 @@ type Deployment struct {
 	stopErr  error
 }
 
+// Service represents a running service within a deployment.
+type Service struct {
+	handle *serviceHandle
+}
+
+// Service retrieves a handle for the named service if it is part of the deployment.
+func (d *Deployment) Service(name string) (*Service, bool) {
+	for _, handle := range d.handles {
+		if handle.name == name {
+			return &Service{handle: handle}, true
+		}
+	}
+	return nil, false
+}
+
+// Name returns the service identifier associated with the handle.
+func (s *Service) Name() string {
+	if s == nil || s.handle == nil {
+		return ""
+	}
+	return s.handle.name
+}
+
+// Replicas returns the number of replicas managed for the service.
+func (s *Service) Replicas() int {
+	if s == nil || s.handle == nil {
+		return 0
+	}
+	return len(s.handle.replicas)
+}
+
+// RestartReplica performs a rolling restart of the specified replica and waits until it reports readiness again.
+func (s *Service) RestartReplica(ctx context.Context, index int) error {
+	if s == nil || s.handle == nil {
+		return fmt.Errorf("service handle is nil")
+	}
+	if index < 0 || index >= len(s.handle.replicas) {
+		return fmt.Errorf("service %s replica %d not available", s.handle.name, index)
+	}
+	replica := s.handle.replicas[index]
+	if replica == nil || replica.supervisor == nil {
+		return fmt.Errorf("service %s replica %d supervisor unavailable", s.handle.name, index)
+	}
+	return replica.supervisor.Restart(ctx)
+}
+
 type serviceHandle struct {
 	name     string
 	replicas []*replicaHandle

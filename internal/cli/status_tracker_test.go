@@ -24,6 +24,9 @@ func TestStatusTrackerUpdatesReadyAndBlockedState(t *testing.T) {
 	if snapshot.Ready {
 		t.Fatalf("expected ready=false after blocked event")
 	}
+	if snapshot.ReadyReplicas != 0 {
+		t.Fatalf("expected ready replicas to remain 0, got %d", snapshot.ReadyReplicas)
+	}
 	if snapshot.Message != "waiting" {
 		t.Fatalf("expected message to be retained, got %q", snapshot.Message)
 	}
@@ -36,6 +39,9 @@ func TestStatusTrackerUpdatesReadyAndBlockedState(t *testing.T) {
 	}
 	if !snapshot.Ready {
 		t.Fatalf("expected ready=true after ready event")
+	}
+	if snapshot.ReadyReplicas != 1 {
+		t.Fatalf("expected readyReplicas=1 after ready event, got %d", snapshot.ReadyReplicas)
 	}
 	if snapshot.Message != "replica 0: ready" {
 		t.Fatalf("expected message to update, got %q", snapshot.Message)
@@ -58,6 +64,9 @@ func TestStatusTrackerAggregatesReplicaReadiness(t *testing.T) {
 	if snap.Replicas != 2 {
 		t.Fatalf("expected replica count 2, got %d", snap.Replicas)
 	}
+	if snap.ReadyReplicas != 0 {
+		t.Fatalf("expected ready replicas 0, got %d", snap.ReadyReplicas)
+	}
 
 	tracker.Apply(engine.Event{Service: "api", Replica: 0, Type: engine.EventTypeReady, Message: "ready", Timestamp: base.Add(20 * time.Millisecond)})
 
@@ -65,12 +74,18 @@ func TestStatusTrackerAggregatesReplicaReadiness(t *testing.T) {
 	if snap.Ready {
 		t.Fatalf("expected service to remain unready until all replicas ready")
 	}
+	if snap.ReadyReplicas != 1 {
+		t.Fatalf("expected ready replicas 1, got %d", snap.ReadyReplicas)
+	}
 
 	tracker.Apply(engine.Event{Service: "api", Replica: 1, Type: engine.EventTypeReady, Message: "ready", Timestamp: base.Add(30 * time.Millisecond)})
 
 	snap = tracker.Snapshot()["api"]
 	if !snap.Ready {
 		t.Fatalf("expected service to report ready once all replicas ready")
+	}
+	if snap.ReadyReplicas != 2 {
+		t.Fatalf("expected ready replicas 2, got %d", snap.ReadyReplicas)
 	}
 
 	tracker.Apply(engine.Event{Service: "api", Replica: 1, Type: engine.EventTypeCrashed, Message: "boom", Timestamp: base.Add(40 * time.Millisecond)})
@@ -81,6 +96,9 @@ func TestStatusTrackerAggregatesReplicaReadiness(t *testing.T) {
 	}
 	if snap.Restarts != 1 {
 		t.Fatalf("expected restarts=1 after crash, got %d", snap.Restarts)
+	}
+	if snap.ReadyReplicas != 1 {
+		t.Fatalf("expected ready replicas to drop to 1, got %d", snap.ReadyReplicas)
 	}
 	if snap.State != engine.EventTypeCrashed {
 		t.Fatalf("expected crashed state, got %q", snap.State)

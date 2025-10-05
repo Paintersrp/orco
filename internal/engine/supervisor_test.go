@@ -523,6 +523,7 @@ func (f *fakeInstance) Stop(ctx context.Context) error {
 	}
 	if f.healthCh != nil {
 		close(f.healthCh)
+		f.healthCh = nil
 	}
 	if ctx != nil {
 		select {
@@ -542,4 +543,94 @@ func (f *fakeInstance) Kill(ctx context.Context) error {
 
 func (f *fakeInstance) Logs(ctx context.Context) (<-chan runtime.LogEntry, error) {
 	return f.logsCh, nil
+}
+
+func TestSupervisorManualRestart(t *testing.T) {
+	svc := &stack.Service{}
+
+	first := &fakeInstance{waitCh: make(chan error, 1)}
+	second := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := &fakeRuntime{instances: []*fakeInstance{first, second}, startCh: make(chan struct{}, 4)}
+
+	events := make(chan Event, 32)
+	sup := newSupervisor("api", 0, svc, rt, events)
+	sup.jitter = func(d time.Duration) time.Duration { return d }
+	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sup.Start(ctx)
+
+	waitForStart(t, rt.startCh)
+
+	first.waitCh <- nil
+
+	if err := sup.AwaitReady(context.Background()); err != nil {
+		t.Fatalf("await ready: %v", err)
+	}
+
+	restartDone := make(chan error, 1)
+	go func() {
+		restartDone <- sup.Restart(context.Background())
+	}()
+
+	waitForStart(t, rt.startCh)
+
+	second.waitCh <- nil
+
+	select {
+	case err := <-restartDone:
+		if err != nil {
+			t.Fatalf("manual restart returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for manual restart to complete")
+	}
+
+	foundStopping := false
+	foundStarting := false
+	foundReady := false
+	deadline := time.After(200 * time.Millisecond)
+collect:
+	for {
+		select {
+		case evt := <-events:
+			if evt.Service != "api" || evt.Replica != 0 {
+				continue
+			}
+			switch evt.Type {
+			case EventTypeStopping:
+				foundStopping = true
+			case EventTypeStarting:
+				if evt.Attempt == 2 {
+					foundStarting = true
+				}
+			case EventTypeReady:
+				if evt.Attempt == 2 {
+					foundReady = true
+				}
+			}
+			if foundStopping && foundStarting && foundReady {
+				break collect
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+
+	if !foundStopping {
+		t.Fatalf("expected stopping event during manual restart")
+	}
+	if !foundStarting {
+		t.Fatalf("expected second start attempt during manual restart")
+	}
+	if !foundReady {
+		t.Fatalf("expected ready event for restart attempt")
+	}
+
+	if err := sup.Stop(context.Background()); err != nil {
+		t.Fatalf("stop supervisor: %v", err)
+	}
 }
