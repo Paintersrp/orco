@@ -542,6 +542,7 @@ func TestLoadEnvFileSingleQuotedValues(t *testing.T) {
 	contents := strings.Join([]string{
 		"SINGLE='value with spaces'",
 		"HASHED='value # with hash'",
+		"COMMENT='value' # inline comment should be ignored",
 		"# comment line should be ignored",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
@@ -558,6 +559,41 @@ func TestLoadEnvFileSingleQuotedValues(t *testing.T) {
 	}
 	if got, want := values["HASHED"], "value # with hash"; got != want {
 		t.Fatalf("single-quoted hash value mismatch: got %q want %q", got, want)
+	}
+	if got, want := values["COMMENT"], "value"; got != want {
+		t.Fatalf("single-quoted comment value mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestLoadEnvFileQuotedValuesWithInlineComments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vars.env")
+	contents := strings.Join([]string{
+		"DOUBLE=\"value\" # inline comment",
+		"DOUBLE_ESCAPED=\"value with \\\"quote\\\"\" # another comment",
+		"SINGLE='value' # trailing comment",
+		"SINGLE_HASH='value # still part of value' # end comment",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	values, err := loadEnvFile(path)
+	if err != nil {
+		t.Fatalf("loadEnvFile returned error: %v", err)
+	}
+
+	if got, want := values["DOUBLE"], "value"; got != want {
+		t.Fatalf("double-quoted inline comment mismatch: got %q want %q", got, want)
+	}
+	if got, want := values["DOUBLE_ESCAPED"], "value with \"quote\""; got != want {
+		t.Fatalf("double-quoted escaped value mismatch: got %q want %q", got, want)
+	}
+	if got, want := values["SINGLE"], "value"; got != want {
+		t.Fatalf("single-quoted inline comment mismatch: got %q want %q", got, want)
+	}
+	if got, want := values["SINGLE_HASH"], "value # still part of value"; got != want {
+		t.Fatalf("single-quoted hash inline comment mismatch: got %q want %q", got, want)
 	}
 }
 
