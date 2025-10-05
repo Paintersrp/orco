@@ -21,6 +21,9 @@ const (
 	EventTypeCrashed  EventType = "crashed"
 	EventTypeFailed   EventType = "failed"
 	EventTypeBlocked  EventType = "blocked"
+	EventTypeCanary   EventType = "canary"
+	EventTypePromoted EventType = "promoted"
+	EventTypeAborted  EventType = "aborted"
 )
 
 // Event represents a single lifecycle or log notification.
@@ -50,6 +53,9 @@ const (
 	ReasonStopFailed        = "stop_failed"
 	ReasonShutdown          = "shutdown"
 	ReasonDependencyBlocked = "dependency_blocked"
+	ReasonCanary            = "canary"
+	ReasonPromoted          = "promoted"
+	ReasonAborted           = "aborted"
 )
 
 func sendEvent(events chan<- Event, service string, replica int, t EventType, message string, attempt int, reason string, err error) {

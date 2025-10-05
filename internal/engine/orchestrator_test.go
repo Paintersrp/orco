@@ -644,7 +644,7 @@ stopLoop:
 	}
 }
 
-func TestServiceUpdateSequentialReadiness(t *testing.T) {
+func TestServiceUpdateCanaryRequiresPromotion(t *testing.T) {
 	apiInitial0 := &fakeInstance{waitCh: make(chan error, 1)}
 	apiInitial1 := &fakeInstance{waitCh: make(chan error, 1)}
 	apiUpdate0 := &fakeInstance{waitCh: make(chan error, 1)}
@@ -671,11 +671,18 @@ func TestServiceUpdateSequentialReadiness(t *testing.T) {
 
 	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
 
-	events := make(chan Event, 64)
+	events := make(chan Event, 128)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
 	drain := make(chan struct{})
 	go func() {
 		defer close(drain)
-		for range events {
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
 		}
 	}()
 
@@ -695,15 +702,6 @@ func TestServiceUpdateSequentialReadiness(t *testing.T) {
 	}
 	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
 		t.Fatalf("expected second replica start, got %s", name)
-	}
-
-	select {
-	case err := <-resultCh:
-		if err != nil {
-			t.Fatalf("orchestrator returned error before readiness: %v", err)
-		}
-		t.Fatalf("orchestrator completed before services became ready")
-	default:
 	}
 
 	apiInitial0.waitCh <- nil
@@ -737,16 +735,21 @@ func TestServiceUpdateSequentialReadiness(t *testing.T) {
 		t.Fatalf("expected first replica restart, got %s", name)
 	}
 
-	select {
-	case name := <-rt.startCh:
-		t.Fatalf("second replica restarted before readiness: %s", name)
-	case <-time.After(150 * time.Millisecond):
-	}
-
 	apiUpdate0.waitCh <- nil
 
+	select {
+	case name := <-rt.startCh:
+		t.Fatalf("unexpected restart before promotion: %s", name)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	promoteDone := make(chan error, 1)
+	go func() {
+		promoteDone <- service.Promote(context.Background())
+	}()
+
 	if name := waitForServiceStart(t, rt.startCh); name != "api[3]" {
-		t.Fatalf("expected second replica restart after readiness, got %s", name)
+		t.Fatalf("expected second replica restart after promotion, got %s", name)
 	}
 
 	apiUpdate1.waitCh <- nil
@@ -758,6 +761,15 @@ func TestServiceUpdateSequentialReadiness(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for service update to complete")
+	}
+
+	select {
+	case err := <-promoteDone:
+		if err != nil {
+			t.Fatalf("promotion failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for promotion to complete")
 	}
 
 	select {
@@ -774,6 +786,339 @@ func TestServiceUpdateSequentialReadiness(t *testing.T) {
 
 	close(events)
 	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	canaryObserved := false
+	promotedObserved := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" {
+			continue
+		}
+		switch evt.Type {
+		case EventTypeCanary:
+			if evt.Replica == 0 && evt.Reason == ReasonCanary {
+				canaryObserved = true
+			}
+		case EventTypePromoted:
+			if evt.Replica == -1 && evt.Reason == ReasonPromoted {
+				promotedObserved = true
+			}
+		case EventTypeAborted:
+			t.Fatalf("unexpected aborted event: %+v", evt)
+		}
+	}
+
+	if !canaryObserved {
+		t.Fatalf("missing canary event for manual promotion: %+v", recordedCopy)
+	}
+	if !promotedObserved {
+		t.Fatalf("missing promoted event for manual promotion: %+v", recordedCopy)
+	}
+}
+
+func TestServiceUpdateAutoPromoteAfterDeadline(t *testing.T) {
+	apiInitial0 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiInitial1 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiUpdate0 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiUpdate1 := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {apiInitial0, apiInitial1, apiUpdate0, apiUpdate1},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 2,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 128)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected first replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected second replica start, got %s", name)
+	}
+
+	apiInitial0.waitCh <- nil
+	apiInitial1.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment returned")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 2,
+		Command:  []string{"sleep", "1"},
+		Update: &stack.UpdatePolicy{
+			PromoteAfter: stack.Duration{Duration: 50 * time.Millisecond},
+		},
+	}
+
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[2]" {
+		t.Fatalf("expected first replica restart, got %s", name)
+	}
+
+	apiUpdate0.waitCh <- nil
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[3]" {
+		t.Fatalf("expected autopromotion to restart second replica, got %s", name)
+	}
+
+	apiUpdate1.waitCh <- nil
+
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatalf("service update failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for service update to complete")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	canaryObserved := false
+	promotedObserved := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" {
+			continue
+		}
+		switch evt.Type {
+		case EventTypeCanary:
+			if evt.Replica == 0 && evt.Reason == ReasonCanary {
+				canaryObserved = true
+			}
+		case EventTypePromoted:
+			if evt.Replica == -1 && evt.Reason == ReasonPromoted {
+				promotedObserved = true
+			}
+		case EventTypeAborted:
+			t.Fatalf("unexpected aborted event: %+v", evt)
+		}
+	}
+
+	if !canaryObserved {
+		t.Fatalf("missing canary event for autopromotion: %+v", recordedCopy)
+	}
+	if !promotedObserved {
+		t.Fatalf("missing promoted event for autopromotion: %+v", recordedCopy)
+	}
+}
+
+func TestServiceUpdateCanaryFailureAborts(t *testing.T) {
+	apiInitial0 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiInitial1 := &fakeInstance{waitCh: make(chan error, 1)}
+	apiFailed := &fakeInstance{waitErr: errors.New("canary blew up")}
+	apiRollback := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {apiInitial0, apiInitial1, apiFailed, apiRollback},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 2,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 128)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected first replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected second replica start, got %s", name)
+	}
+
+	apiInitial0.waitCh <- nil
+	apiInitial1.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment returned")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{Runtime: "test", Replicas: 2, Command: []string{"sleep", "1"}}
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[2]" {
+		t.Fatalf("expected canary restart, got %s", name)
+	}
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[3]" {
+		t.Fatalf("expected rollback restart, got %s", name)
+	}
+
+	apiRollback.waitCh <- nil
+
+	select {
+	case err := <-updateDone:
+		if err == nil {
+			t.Fatalf("expected update failure")
+		} else if !strings.Contains(err.Error(), "promotion failed") {
+			t.Fatalf("unexpected update error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for update failure")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	abortedObserved := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" {
+			continue
+		}
+		if evt.Type == EventTypeAborted {
+			abortedObserved = true
+			if evt.Reason != ReasonAborted {
+				t.Fatalf("unexpected abort reason: %+v", evt)
+			}
+			if evt.Err == nil || !strings.Contains(evt.Err.Error(), "canary blew up") {
+				t.Fatalf("abort event missing error context: %+v", evt)
+			}
+		}
+		if evt.Type == EventTypePromoted {
+			t.Fatalf("unexpected promoted event on failure: %+v", evt)
+		}
+	}
+
+	if !abortedObserved {
+		t.Fatalf("missing aborted event: %+v", recordedCopy)
+	}
 }
 
 type recordingRuntime struct {

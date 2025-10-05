@@ -125,9 +125,10 @@ type LogProbeSpec struct {
 
 // UpdateStrategy controls rolling update behaviour.
 type UpdateStrategy struct {
-	Strategy       string `yaml:"strategy"`
-	MaxUnavailable int    `yaml:"maxUnavailable"`
-	MaxSurge       int    `yaml:"maxSurge"`
+	Strategy       string   `yaml:"strategy"`
+	MaxUnavailable int      `yaml:"maxUnavailable"`
+	MaxSurge       int      `yaml:"maxSurge"`
+	PromoteAfter   Duration `yaml:"promoteAfter"`
 }
 
 // RestartPolicy defines restart behaviour for a service.
@@ -425,6 +426,7 @@ func (s *ServiceSpec) Clone() *ServiceSpec {
 			Strategy:       s.Update.Strategy,
 			MaxUnavailable: s.Update.MaxUnavailable,
 			MaxSurge:       s.Update.MaxSurge,
+			PromoteAfter:   s.Update.PromoteAfter,
 		}
 	}
 	if s.RestartPolicy != nil {
