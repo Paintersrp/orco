@@ -79,7 +79,7 @@ func TestEncodeLogEventKeepsProvidedLevel(t *testing.T) {
 func TestNewLogRecordRedactsSecrets(t *testing.T) {
 	event := engine.Event{
 		Timestamp: time.Unix(0, 0),
-		Message:   `sending ${API_TOKEN} AWS_SECRET_ACCESS_KEY="super-secret"`,
+		Message:   `sending ${API_TOKEN} AWS_SECRET_ACCESS_KEY="super-secret" API_KEY="value with spaces" DB_PASSWORD='top secret value'`,
 	}
 
 	record := NewLogRecord(event)
@@ -93,7 +93,19 @@ func TestNewLogRecordRedactsSecrets(t *testing.T) {
 	if strings.Contains(record.Message, "super-secret") {
 		t.Fatalf("expected secret value to be redacted, got %q", record.Message)
 	}
+	if strings.Contains(record.Message, "value with spaces") {
+		t.Fatalf("expected quoted secret containing spaces to be redacted, got %q", record.Message)
+	}
+	if strings.Contains(record.Message, "top secret value") {
+		t.Fatalf("expected single quoted secret containing spaces to be redacted, got %q", record.Message)
+	}
 	if !strings.Contains(record.Message, `AWS_SECRET_ACCESS_KEY="[redacted]"`) {
 		t.Fatalf("expected known secret key redacted, got %q", record.Message)
+	}
+	if !strings.Contains(record.Message, `API_KEY="[redacted]"`) {
+		t.Fatalf("expected quoted secret with spaces to be redacted, got %q", record.Message)
+	}
+	if !strings.Contains(record.Message, "DB_PASSWORD='[redacted]'") {
+		t.Fatalf("expected single quoted secret with spaces to be redacted, got %q", record.Message)
 	}
 }

@@ -9,7 +9,7 @@ const redactedPlaceholder = "[redacted]"
 
 var (
 	templateVarPattern = regexp.MustCompile(`\$\{[^}]+\}`)
-	secretKeyPattern   = regexp.MustCompile(`(?i)\b(` + strings.Join(secretKeys(), "|") + `)\b(\s*[:=]\s*)(["']?)([^"'\s]+)(["']?)`)
+	secretKeyPattern   = regexp.MustCompile(`(?i)\b(` + strings.Join(secretKeys(), "|") + `)\b(\s*[:=]\s*)(?:"([^"]*)"|'([^']*)'|([^"'\s]+))`)
 )
 
 func secretKeys() []string {
@@ -46,5 +46,22 @@ func RedactSecrets(message string) string {
 	redacted := templateVarPattern.ReplaceAllStringFunc(message, func(match string) string {
 		return "${" + redactedPlaceholder + "}"
 	})
-	return secretKeyPattern.ReplaceAllString(redacted, "$1$2$3"+redactedPlaceholder+"$5")
+	return secretKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+		submatches := secretKeyPattern.FindStringSubmatch(match)
+		if len(submatches) == 0 {
+			return match
+		}
+
+		key := submatches[1]
+		assignment := submatches[2]
+
+		switch {
+		case submatches[3] != "":
+			return key + assignment + "\"" + redactedPlaceholder + "\""
+		case submatches[4] != "":
+			return key + assignment + "'" + redactedPlaceholder + "'"
+		default:
+			return key + assignment + redactedPlaceholder
+		}
+	})
 }
