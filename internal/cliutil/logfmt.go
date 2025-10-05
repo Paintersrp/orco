@@ -41,7 +41,7 @@ func NewLogRecord(event engine.Event) LogRecord {
 		Service:   event.Service,
 		Replica:   event.Replica,
 		Level:     level,
-		Message:   event.Message,
+		Message:   RedactSecrets(event.Message),
 		Source:    source,
 	}
 }

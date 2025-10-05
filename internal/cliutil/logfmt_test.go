@@ -3,6 +3,7 @@ package cliutil
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,5 +73,27 @@ func TestEncodeLogEventKeepsProvidedLevel(t *testing.T) {
 
 	if record.Level != "debug" {
 		t.Fatalf("expected level %q, got %q", "debug", record.Level)
+	}
+}
+
+func TestNewLogRecordRedactsSecrets(t *testing.T) {
+	event := engine.Event{
+		Timestamp: time.Unix(0, 0),
+		Message:   `sending ${API_TOKEN} AWS_SECRET_ACCESS_KEY="super-secret"`,
+	}
+
+	record := NewLogRecord(event)
+
+	if strings.Contains(record.Message, "${API_TOKEN}") {
+		t.Fatalf("expected template placeholder to be redacted, got %q", record.Message)
+	}
+	if !strings.Contains(record.Message, "${[redacted]}") {
+		t.Fatalf("expected template placeholder marker, got %q", record.Message)
+	}
+	if strings.Contains(record.Message, "super-secret") {
+		t.Fatalf("expected secret value to be redacted, got %q", record.Message)
+	}
+	if !strings.Contains(record.Message, `AWS_SECRET_ACCESS_KEY="[redacted]"`) {
+		t.Fatalf("expected known secret key redacted, got %q", record.Message)
 	}
 }

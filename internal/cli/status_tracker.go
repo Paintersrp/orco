@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Paintersrp/orco/internal/cliutil"
 	"github.com/Paintersrp/orco/internal/engine"
 )
 
@@ -102,7 +103,7 @@ func (t *statusTracker) Apply(evt engine.Event) {
 		if evt.Replica >= 0 && message == "" {
 			message = fmt.Sprintf("replica %d", evt.Replica)
 		}
-		state.message = message
+		state.message = cliutil.RedactSecrets(message)
 	}
 
 	totalRestarts := 0
