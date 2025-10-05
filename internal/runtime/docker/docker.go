@@ -85,24 +85,46 @@ func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtim
 	}
 
 	inst := newDockerInstance(cli, containerID, spec.Name, health)
+
+	if inst.health == nil {
+		inst.signalReady(nil)
+		close(inst.healthEvents)
+		close(inst.healthDone)
+	} else {
+		prober, err := probe.New(inst.health)
+		if err != nil {
+			inst.signalReady(err)
+			close(inst.healthEvents)
+			close(inst.healthDone)
+		} else {
+			inst.healthProber = prober
+			if observer, ok := prober.(probe.LogObserver); ok {
+				inst.logObservers = append(inst.logObservers, observer)
+			}
+			inst.startHealthMonitor()
+		}
+	}
+
 	inst.startLogStreamer()
 	inst.startWaiter()
-	inst.startHealthMonitor()
 
 	return inst, nil
 }
 
 type dockerInstance struct {
-	cli         *client.Client
-	containerID string
-	name        string
-	health      *stack.Health
+	cli          *client.Client
+	containerID  string
+	name         string
+	health       *stack.Health
+	healthProber probe.Prober
 
 	logs    chan runtime.LogEntry
 	logCtx  context.Context
 	logStop context.CancelFunc
 	logOnce sync.Once
 	logDone chan struct{}
+
+	logObservers []probe.LogObserver
 
 	healthEvents chan probe.State
 	healthCtx    context.Context
@@ -163,13 +185,35 @@ func (i *dockerInstance) startLogStreamer() {
 			}
 			defer reader.Close()
 
-			stdout := newLogWriter(i.logCtx, i.logs, runtime.LogSourceStdout, "")
-			stderr := newLogWriter(i.logCtx, i.logs, runtime.LogSourceStderr, "warn")
+			stdout := newLogWriter(i.logCtx, i.deliverLog, runtime.LogSourceStdout, "")
+			stderr := newLogWriter(i.logCtx, i.deliverLog, runtime.LogSourceStderr, "warn")
 			_, _ = stdcopy.StdCopy(stdout, stderr, reader)
 			stdout.Close()
 			stderr.Close()
 		}()
 	})
+}
+
+func (i *dockerInstance) deliverLog(entry runtime.LogEntry) {
+	if entry.Message == "" {
+		return
+	}
+	select {
+	case i.logs <- entry:
+	case <-i.logCtx.Done():
+		return
+	}
+	i.forwardLog(entry)
+}
+
+func (i *dockerInstance) forwardLog(entry runtime.LogEntry) {
+	if len(i.logObservers) == 0 {
+		return
+	}
+	logEntry := probe.LogEntry{Message: entry.Message, Source: entry.Source, Level: entry.Level}
+	for _, observer := range i.logObservers {
+		observer.ObserveLog(logEntry)
+	}
 }
 
 func (i *dockerInstance) startWaiter() {
@@ -217,22 +261,12 @@ func (i *dockerInstance) signalReady(err error) {
 }
 
 func (i *dockerInstance) startHealthMonitor() {
-	if i.health == nil {
-		i.signalReady(nil)
-		close(i.healthEvents)
-		close(i.healthDone)
+	if i.healthProber == nil {
 		return
 	}
 	go func() {
 		defer close(i.healthDone)
-		prober, err := probe.New(i.health)
-		if err != nil {
-			i.signalReady(err)
-			close(i.healthEvents)
-			return
-		}
-
-		events := probe.Watch(i.healthCtx, prober, i.health, nil)
+		events := probe.Watch(i.healthCtx, i.healthProber, i.health, nil)
 		readyReported := false
 
 		for {
@@ -454,15 +488,15 @@ func waitOutcomeExitError(outcome waitOutcome) error {
 
 type logWriter struct {
 	ctx    context.Context
-	ch     chan<- runtime.LogEntry
+	emitFn func(runtime.LogEntry)
 	source string
 	level  string
 	buf    bytes.Buffer
 	mu     sync.Mutex
 }
 
-func newLogWriter(ctx context.Context, ch chan<- runtime.LogEntry, source, level string) *logWriter {
-	return &logWriter{ctx: ctx, ch: ch, source: source, level: level}
+func newLogWriter(ctx context.Context, emit func(runtime.LogEntry), source, level string) *logWriter {
+	return &logWriter{ctx: ctx, emitFn: emit, source: source, level: level}
 }
 
 func (w *logWriter) Write(p []byte) (int, error) {
@@ -496,9 +530,11 @@ func (w *logWriter) emit(line string) {
 		return
 	}
 	select {
-	case w.ch <- runtime.LogEntry{Message: line, Source: w.source, Level: w.level}:
 	case <-w.ctx.Done():
+		return
+	default:
 	}
+	w.emitFn(runtime.LogEntry{Message: line, Source: w.source, Level: w.level})
 }
 
 func (w *logWriter) Close() {

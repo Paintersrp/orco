@@ -83,6 +83,10 @@ func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtim
 			return nil, fmt.Errorf("create probe: %w", err)
 		}
 
+		if observer, ok := prober.(probe.LogObserver); ok {
+			inst.logObservers = append(inst.logObservers, observer)
+		}
+
 		inst.healthCh = make(chan probe.State, 1)
 		inst.readyCh = make(chan struct{})
 		inst.readyErr = make(chan error, 1)
@@ -130,6 +134,8 @@ type processInstance struct {
 	readyOnce    sync.Once
 	readyErrOnce sync.Once
 	initialReady atomic.Bool
+
+	logObservers []probe.LogObserver
 }
 
 func (p *processInstance) WaitReady(ctx context.Context) error {
@@ -211,7 +217,18 @@ func (p *processInstance) streamLogs(r io.Reader, source string, wg *sync.WaitGr
 		if source == runtime.LogSourceStderr {
 			entry.Level = "warn"
 		}
+		p.forwardLog(entry)
 		p.logs <- entry
+	}
+}
+
+func (p *processInstance) forwardLog(entry runtime.LogEntry) {
+	if len(p.logObservers) == 0 {
+		return
+	}
+	logEntry := probe.LogEntry{Message: entry.Message, Source: entry.Source, Level: entry.Level}
+	for _, observer := range p.logObservers {
+		observer.ObserveLog(logEntry)
 	}
 }
 

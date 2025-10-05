@@ -195,6 +195,94 @@ func TestWatchCommandProbe(t *testing.T) {
 	})
 }
 
+func TestLogProbeReadiness(t *testing.T) {
+	spec := &stack.Health{
+		Interval:         stack.Duration{Duration: 20 * time.Millisecond},
+		Timeout:          stack.Duration{Duration: 100 * time.Millisecond},
+		FailureThreshold: 1,
+		SuccessThreshold: 1,
+		Log: &stack.LogProbe{
+			Pattern: "ready",
+		},
+	}
+
+	prober, err := New(spec)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	observer, ok := prober.(LogObserver)
+	if !ok {
+		t.Fatalf("log prober does not implement LogObserver")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events := Watch(ctx, prober, spec, nil)
+
+	ensureNoEvent(t, events, 40*time.Millisecond)
+
+	observer.ObserveLog(LogEntry{Message: "still starting"})
+	ensureNoEvent(t, events, 40*time.Millisecond)
+
+	observer.ObserveLog(LogEntry{Message: "service ready"})
+
+	ready := expectEvent(t, events, StatusReady, time.Second)
+	if ready.Err != nil {
+		t.Fatalf("expected ready without error, got %v", ready.Err)
+	}
+
+	ensureNoEvent(t, events, 80*time.Millisecond)
+}
+
+func TestExpressionHTTPOrLog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+
+	spec := &stack.Health{
+		GracePeriod:      stack.Duration{Duration: 120 * time.Millisecond},
+		Interval:         stack.Duration{Duration: 25 * time.Millisecond},
+		Timeout:          stack.Duration{Duration: 80 * time.Millisecond},
+		FailureThreshold: 3,
+		SuccessThreshold: 1,
+		HTTP: &stack.HTTPProbe{
+			URL: server.URL,
+		},
+		Log: &stack.LogProbe{
+			Pattern: "ready",
+		},
+		Expression: "http || log",
+	}
+
+	prober, err := New(spec)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	observer, ok := prober.(LogObserver)
+	if !ok {
+		t.Fatalf("combined prober does not implement LogObserver")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events := Watch(ctx, prober, spec, nil)
+
+	time.Sleep(40 * time.Millisecond)
+	observer.ObserveLog(LogEntry{Message: "service ready"})
+
+	ready := expectEvent(t, events, StatusReady, time.Second)
+	if ready.Err != nil {
+		t.Fatalf("expected ready without error, got %v", ready.Err)
+	}
+
+	ensureNoEvent(t, events, 150*time.Millisecond)
+}
+
 func TestNewCommandRequiresArguments(t *testing.T) {
 	_, err := newCommandProber(&stack.CommandProbe{})
 	if err == nil {
