@@ -88,16 +88,23 @@ type serviceEvent struct {
 }
 
 type serviceState struct {
-	name      string
-	firstSeen time.Time
-	lastEvent time.Time
-	state     engine.EventType
-	ready     bool
-	replicas  int
-	restarts  int
-	message   string
+	name         string
+	firstSeen    time.Time
+	lastEvent    time.Time
+	state        engine.EventType
+	ready        bool
+	replicaCount int
+	restarts     int
+	message      string
 
-	events []serviceEvent
+	replicas map[int]*replicaState
+	events   []serviceEvent
+}
+
+type replicaState struct {
+	ready    bool
+	restarts int
+	state    engine.EventType
 }
 
 // New constructs a UI configured with the supplied options.
@@ -403,12 +410,21 @@ func (u *UI) applyEvent(evt engine.Event) {
 		evt.Timestamp = time.Now()
 	}
 
+	updateLogs := u.applyEventLocked(evt)
+	u.queueRefresh(updateLogs)
+}
+
+func (u *UI) applyEventLocked(evt engine.Event) bool {
 	u.mu.Lock()
+	defer u.mu.Unlock()
 
 	state := u.services[evt.Service]
 	if state == nil {
-		state = &serviceState{name: evt.Service, firstSeen: evt.Timestamp}
+		state = &serviceState{name: evt.Service, firstSeen: evt.Timestamp, replicas: make(map[int]*replicaState)}
 		u.services[evt.Service] = state
+	}
+	if state.replicas == nil {
+		state.replicas = make(map[int]*replicaState)
 	}
 	state.lastEvent = evt.Timestamp
 	if state.firstSeen.IsZero() {
@@ -417,20 +433,36 @@ func (u *UI) applyEvent(evt engine.Event) {
 
 	if evt.Type != engine.EventTypeLog {
 		state.state = evt.Type
-		if evt.Type == engine.EventTypeReady {
-			state.ready = true
+		msg := formatEventMessage(evt)
+		if evt.Replica >= 0 && msg != "" {
+			msg = fmt.Sprintf("replica %d: %s", evt.Replica, msg)
+		} else if evt.Replica >= 0 && msg == "" {
+			msg = fmt.Sprintf("replica %d", evt.Replica)
 		}
-		if evt.Type == engine.EventTypeUnready || evt.Type == engine.EventTypeStopping || evt.Type == engine.EventTypeStopped || evt.Type == engine.EventTypeCrashed {
-			state.ready = false
-		}
-		if evt.Type == engine.EventTypeCrashed {
-			state.restarts++
-		}
-		state.message = formatEventMessage(evt)
+		state.message = msg
 	}
 
-	if evt.Replica+1 > state.replicas {
-		state.replicas = evt.Replica + 1
+	if evt.Replica >= 0 {
+		rep := state.replicas[evt.Replica]
+		if rep == nil {
+			rep = &replicaState{}
+			state.replicas[evt.Replica] = rep
+		}
+		if evt.Type != engine.EventTypeLog {
+			rep.state = evt.Type
+			switch evt.Type {
+			case engine.EventTypeReady:
+				rep.ready = true
+			case engine.EventTypeUnready, engine.EventTypeStopping, engine.EventTypeStopped, engine.EventTypeCrashed, engine.EventTypeFailed:
+				rep.ready = false
+			}
+			if evt.Type == engine.EventTypeCrashed {
+				rep.restarts++
+			}
+		}
+		if evt.Replica+1 > state.replicaCount {
+			state.replicaCount = evt.Replica + 1
+		}
 	}
 
 	record := serviceEvent{
@@ -471,11 +503,32 @@ func (u *UI) applyEvent(evt engine.Event) {
 		state.events = append([]serviceEvent(nil), state.events[trim:]...)
 	}
 
-	selected := state.name == u.selected
-	updateLogs := selected || u.selected == ""
-	u.mu.Unlock()
+	state.aggregate()
 
-	u.queueRefresh(updateLogs)
+	selected := state.name == u.selected
+	return selected || u.selected == ""
+}
+
+func (s *serviceState) aggregate() {
+	totalRestarts := 0
+	ready := s.replicaCount > 0
+	for i := 0; i < s.replicaCount; i++ {
+		rep := s.replicas[i]
+		if rep == nil || !rep.ready {
+			ready = false
+		}
+		if rep != nil {
+			totalRestarts += rep.restarts
+		}
+	}
+	if s.replicaCount == 0 {
+		ready = false
+	}
+	s.ready = ready
+	s.restarts = totalRestarts
+	if s.state == engine.EventTypeReady && !s.ready {
+		s.state = engine.EventTypeStarting
+	}
 }
 
 func formatEventMessage(evt engine.Event) string {
@@ -553,8 +606,8 @@ func (u *UI) refreshTableLocked() {
 			ready = "Yes"
 		}
 		repl := "-"
-		if state.replicas > 0 {
-			repl = fmt.Sprintf("%d", state.replicas)
+		if state.replicaCount > 0 {
+			repl = fmt.Sprintf("%d", state.replicaCount)
 		}
 		message := state.message
 		if len(message) > 80 {

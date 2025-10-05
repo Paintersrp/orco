@@ -24,11 +24,12 @@ func newStatusCmd(ctx *context) *cobra.Command {
 			snapshot := tracker.Snapshot()
 
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "SERVICE\tSTATE\tREADY\tRESTARTS\tAGE\tMESSAGE")
+			fmt.Fprintln(w, "SERVICE\tSTATE\tREADY\tREPL\tRESTARTS\tAGE\tMESSAGE")
 			for _, name := range doc.File.ServicesSorted() {
 				status, ok := snapshot[name]
 				state := formatStatusState(status.State)
 				ready := "-"
+				replicas := "-"
 				restarts := 0
 				age := "-"
 				message := "-"
@@ -48,6 +49,9 @@ func newStatusCmd(ctx *context) *cobra.Command {
 					} else {
 						ready = "No"
 					}
+					if status.Replicas > 0 {
+						replicas = fmt.Sprintf("%d", status.Replicas)
+					}
 					restarts = status.Restarts
 					if status.Message != "" {
 						message = status.Message
@@ -56,7 +60,7 @@ func newStatusCmd(ctx *context) *cobra.Command {
 					}
 					state = formatStatusState(status.State)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", name, state, ready, restarts, age, message)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", name, state, ready, replicas, restarts, age, message)
 			}
 			w.Flush()
 			fmt.Fprintf(cmd.OutOrStdout(), "\nStack: %s (version %s)\n", doc.File.Stack.Name, doc.File.Version)

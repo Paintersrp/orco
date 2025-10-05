@@ -33,6 +33,7 @@ type restartPolicy struct {
 // transitions and initiates restarts based on the configured restart policy.
 type supervisor struct {
 	name    string
+	replica int
 	service *stack.Service
 	runtime runtime.Runtime
 
@@ -65,9 +66,10 @@ type supervisor struct {
 	stopOnce sync.Once
 }
 
-func newSupervisor(name string, svc *stack.Service, rt runtime.Runtime, events chan<- Event) *supervisor {
+func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runtime, events chan<- Event) *supervisor {
 	sup := &supervisor{
 		name:      name,
+		replica:   replica,
 		service:   svc,
 		runtime:   rt,
 		events:    events,
@@ -84,7 +86,7 @@ func newSupervisor(name string, svc *stack.Service, rt runtime.Runtime, events c
 	return sup
 }
 
-func buildStartSpec(name string, svc *stack.Service) runtime.StartSpec {
+func buildStartSpec(name string, replica int, svc *stack.Service) runtime.StartSpec {
 	spec := runtime.StartSpec{Name: name}
 	if svc == nil {
 		return spec
@@ -203,9 +205,9 @@ func (s *supervisor) run() {
 		if attempt > 1 {
 			reason = ReasonRestart
 		}
-		sendEvent(s.events, s.name, EventTypeStarting, "starting service", attempt, reason, nil)
+		sendEvent(s.events, s.name, s.replica, EventTypeStarting, "starting service", attempt, reason, nil)
 
-		spec := buildStartSpec(s.name, s.service)
+		spec := buildStartSpec(s.name, s.replica, s.service)
 		instance, err := s.runtime.Start(s.ctx, spec)
 		if err != nil {
 			if s.ctx.Err() != nil {
@@ -215,9 +217,9 @@ func (s *supervisor) run() {
 				return
 			}
 
-			sendEvent(s.events, s.name, EventTypeCrashed, "start failed", attempt, ReasonStartFailure, err)
+			sendEvent(s.events, s.name, s.replica, EventTypeCrashed, "start failed", attempt, ReasonStartFailure, err)
 			if !s.allowRestart(restarts) {
-				sendEvent(s.events, s.name, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, err)
+				sendEvent(s.events, s.name, s.replica, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, err)
 				s.deliverStarted(err)
 				s.deliverInitial(err)
 				s.setRunErr(err)
@@ -250,9 +252,9 @@ func (s *supervisor) run() {
 			return
 		}
 
-		sendEvent(s.events, s.name, EventTypeCrashed, "instance crashed", attempt, ReasonInstanceCrash, instErr)
+		sendEvent(s.events, s.name, s.replica, EventTypeCrashed, "instance crashed", attempt, ReasonInstanceCrash, instErr)
 		if !s.allowRestart(restarts) {
-			sendEvent(s.events, s.name, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, instErr)
+			sendEvent(s.events, s.name, s.replica, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, instErr)
 			if !ready {
 				s.deliverInitial(instErr)
 			}
@@ -319,7 +321,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 	if instance != nil {
 		logs, err := instance.Logs(s.ctx)
 		if err != nil {
-			sendEvent(s.events, s.name, EventTypeError, "log stream unavailable", attempt, ReasonLogStreamError, err)
+			sendEvent(s.events, s.name, s.replica, EventTypeError, "log stream unavailable", attempt, ReasonLogStreamError, err)
 		} else if logs != nil {
 			logWG.Add(1)
 			go s.streamLogs(logs, &logWG, attempt)
@@ -359,7 +361,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 			readyObserved = true
 			s.deliverInitial(nil)
 			if healthCh == nil {
-				sendEvent(s.events, s.name, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
+				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			}
 		case state, ok := <-healthCh:
 			if !ok {
@@ -380,7 +382,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 			case probe.StatusReady:
 				readyObserved = true
 				s.deliverInitial(nil)
-				sendEvent(s.events, s.name, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
+				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			case probe.StatusUnready:
 				if !readyObserved {
 					ctx, cancel := failureStopContext()
@@ -392,7 +394,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 					}
 					return errors.New("service reported unready"), readyObserved
 				}
-				sendEvent(s.events, s.name, EventTypeUnready, "service unready", attempt, ReasonProbeUnready, state.Err)
+				sendEvent(s.events, s.name, s.replica, EventTypeUnready, "service unready", attempt, ReasonProbeUnready, state.Err)
 				ctx, cancel := failureStopContext()
 				_ = s.stopInstance(instance, ctx)
 				cancel()
@@ -412,7 +414,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 				stopErr := s.stopInstance(instance, stopCtx)
 				s.setStopErr(stopErr)
 				logWG.Wait()
-				sendEvent(s.events, s.name, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
+				sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
 				return nil, readyObserved
 			}
 			exitErr := err
@@ -435,7 +437,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int) (error
 			err := s.stopInstance(instance, stopCtx)
 			s.setStopErr(err)
 			logWG.Wait()
-			sendEvent(s.events, s.name, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
+			sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
 			return nil, readyObserved
 		}
 	}
@@ -485,7 +487,7 @@ func (s *supervisor) normalizeLog(entry runtime.LogEntry, attempt int) Event {
 	return Event{
 		Timestamp: ts,
 		Service:   s.name,
-		Replica:   0,
+		Replica:   s.replica,
 		Type:      EventTypeLog,
 		Message:   entry.Message,
 		Level:     level,
@@ -518,7 +520,7 @@ func (s *supervisor) emitDropped(count int, block bool, attempt int) bool {
 	evt := Event{
 		Timestamp: time.Now(),
 		Service:   s.name,
-		Replica:   0,
+		Replica:   s.replica,
 		Type:      EventTypeLog,
 		Message:   fmt.Sprintf("dropped=%d", count),
 		Level:     "warn",

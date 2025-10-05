@@ -52,14 +52,14 @@ const (
 	ReasonDependencyBlocked = "dependency_blocked"
 )
 
-func sendEvent(events chan<- Event, service string, t EventType, message string, attempt int, reason string, err error) {
+func sendEvent(events chan<- Event, service string, replica int, t EventType, message string, attempt int, reason string, err error) {
 	if events == nil {
 		return
 	}
 	events <- Event{
 		Timestamp: time.Now(),
 		Service:   service,
-		Replica:   0,
+		Replica:   replica,
 		Type:      t,
 		Message:   message,
 		Level:     "info",
