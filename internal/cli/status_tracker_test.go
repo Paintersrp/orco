@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -138,6 +139,43 @@ func TestStatusTrackerRedactsSecretsInMessages(t *testing.T) {
 	}
 	if !strings.Contains(snap.Message, "AWS_SECRET_ACCESS_KEY=[redacted]") {
 		t.Fatalf("expected known secret key redacted, got %q", snap.Message)
+	}
+}
+
+func TestStatusTrackerTracksPromotionStates(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStatusTracker()
+	base := time.Now()
+
+	tracker.Apply(engine.Event{Service: "api", Replica: 0, Type: engine.EventTypeCanary, Message: "canary replica ready", Timestamp: base})
+
+	snap := tracker.Snapshot()["api"]
+	if snap.State != engine.EventTypeCanary {
+		t.Fatalf("expected canary state, got %q", snap.State)
+	}
+	if !strings.Contains(snap.Message, "canary replica ready") {
+		t.Fatalf("expected canary message to be recorded, got %q", snap.Message)
+	}
+
+	tracker.Apply(engine.Event{Service: "api", Replica: -1, Type: engine.EventTypePromoted, Message: "promotion complete", Timestamp: base.Add(time.Second)})
+
+	snap = tracker.Snapshot()["api"]
+	if snap.State != engine.EventTypePromoted {
+		t.Fatalf("expected promoted state, got %q", snap.State)
+	}
+	if !strings.Contains(snap.Message, "promotion complete") {
+		t.Fatalf("expected promoted message, got %q", snap.Message)
+	}
+
+	tracker.Apply(engine.Event{Service: "api", Replica: 0, Type: engine.EventTypeAborted, Err: errors.New("canary failed"), Timestamp: base.Add(2 * time.Second)})
+
+	snap = tracker.Snapshot()["api"]
+	if snap.State != engine.EventTypeAborted {
+		t.Fatalf("expected aborted state, got %q", snap.State)
+	}
+	if !strings.Contains(snap.Message, "canary failed") {
+		t.Fatalf("expected aborted message to reference error, got %q", snap.Message)
 	}
 }
 
