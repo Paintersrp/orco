@@ -18,6 +18,26 @@ type Graph struct {
 	order    []string
 }
 
+// GraphServiceStatus captures the status information needed to render DOT output.
+type GraphServiceStatus struct {
+	State   EventType
+	Ready   bool
+	Message string
+}
+
+// DependencyMetadata conveys dependency attributes for DOT rendering.
+type DependencyMetadata struct {
+	Require        string
+	BlockingReason string
+}
+
+const (
+	dotColorReady   = "#c6f6d5"
+	dotColorBlocked = "#fefcbf"
+	dotColorFailed  = "#fed7d7"
+	dotColorPending = "#e2e8f0"
+)
+
 // BuildGraph constructs the dependency graph and validates acyclicity.
 func BuildGraph(doc *stack.StackFile) (*Graph, error) {
 	if doc == nil {
@@ -66,20 +86,142 @@ func (g *Graph) Dependents(name string) []string {
 	return out
 }
 
-// DOT renders the graph in Graphviz dot format.
-func (g *Graph) DOT() string {
+// DOT renders the graph in Graphviz dot format with optional status and dependency metadata.
+func (g *Graph) DOT(statuses map[string]GraphServiceStatus, deps map[string]map[string]DependencyMetadata) string {
 	var b strings.Builder
 	b.WriteString("digraph orco {\n")
-	for svc := range g.services {
-		b.WriteString(fmt.Sprintf("  \"%s\";\n", svc))
+
+	for _, svc := range g.order {
+		status := statuses[svc]
+		labelParts := []string{svc}
+		statusLabel, statusMessage, fillColor := describeNodeStatus(status)
+		if statusLabel != "" {
+			labelParts = append(labelParts, statusLabel)
+		}
+		if statusMessage != "" {
+			labelParts = append(labelParts, statusMessage)
+		}
+		label := formatDOTLabel(labelParts)
+		attrs := []string{fmt.Sprintf("label=\"%s\"", label)}
+		if fillColor != "" {
+			attrs = append(attrs, "style=\"filled\"")
+			attrs = append(attrs, fmt.Sprintf("fillcolor=\"%s\"", fillColor))
+		}
+		b.WriteString(fmt.Sprintf("  \"%s\" [%s];\n", escapeDOTID(svc), strings.Join(attrs, " ")))
 	}
-	for from, tos := range g.edges {
-		for _, to := range tos {
-			b.WriteString(fmt.Sprintf("  \"%s\" -> \"%s\";\n", from, to))
+
+	for _, from := range g.order {
+		seen := make(map[string]bool)
+		if svc := g.services[from]; svc != nil {
+			for _, dep := range svc.DependsOn {
+				writeDOTEdge(&b, from, dep.Target, statuses, deps)
+				seen[dep.Target] = true
+			}
+		}
+		for _, to := range g.edges[from] {
+			if seen[to] {
+				continue
+			}
+			writeDOTEdge(&b, from, to, statuses, deps)
 		}
 	}
+
 	b.WriteString("}\n")
 	return b.String()
+}
+
+func describeNodeStatus(status GraphServiceStatus) (label string, message string, fillColor string) {
+	if status.Ready {
+		return "Ready", "", dotColorReady
+	}
+
+	switch status.State {
+	case EventTypeBlocked:
+		msg := status.Message
+		if msg == "" {
+			msg = "blocked"
+		}
+		return "Blocked", msg, dotColorBlocked
+	case EventTypeFailed, EventTypeCrashed, EventTypeError:
+		msg := status.Message
+		if msg == "" {
+			msg = "failure"
+		}
+		return "Failed", msg, dotColorFailed
+	case "":
+		return "Pending", "", dotColorPending
+	default:
+		return formatEventType(status.State), status.Message, dotColorPending
+	}
+}
+
+func writeDOTEdge(b *strings.Builder, from, to string, statuses map[string]GraphServiceStatus, deps map[string]map[string]DependencyMetadata) {
+	meta := DependencyMetadata{}
+	if deps != nil {
+		if m, ok := deps[from]; ok {
+			if depMeta, ok := m[to]; ok {
+				meta = depMeta
+			}
+		}
+	}
+	if meta.Require == "" {
+		meta.Require = "ready"
+	}
+
+	if meta.BlockingReason == "" {
+		if status, ok := statuses[from]; ok && status.State == EventTypeBlocked && status.Message != "" {
+			if strings.Contains(status.Message, to) {
+				meta.BlockingReason = status.Message
+			}
+		}
+	}
+
+	labelParts := []string{fmt.Sprintf("require=%s", meta.Require)}
+	if meta.BlockingReason != "" {
+		labelParts = append(labelParts, meta.BlockingReason)
+	}
+
+	label := formatDOTLabel(labelParts)
+	attrs := []string{fmt.Sprintf("label=\"%s\"", label)}
+	b.WriteString(fmt.Sprintf("  \"%s\" -> \"%s\" [%s];\n", escapeDOTID(from), escapeDOTID(to), strings.Join(attrs, " ")))
+}
+
+func formatDOTLabel(parts []string) string {
+	escaped := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		escaped = append(escaped, escapeDOTLabel(part))
+	}
+	if len(escaped) == 0 {
+		return ""
+	}
+	return strings.Join(escaped, "\\n")
+}
+
+func escapeDOTLabel(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	return s
+}
+
+func escapeDOTID(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	return s
+}
+
+func formatEventType(t EventType) string {
+	if t == "" {
+		return "-"
+	}
+	s := string(t)
+	if len(s) <= 1 {
+		return strings.ToUpper(s)
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 func topoSort(edges map[string][]string) ([]string, error) {

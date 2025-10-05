@@ -21,12 +21,40 @@ func newGraphCmd(ctx *context) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if dot {
-				fmt.Fprint(cmd.OutOrStdout(), doc.Graph.DOT())
-				return nil
-			}
 			tracker := ctx.statusTracker()
 			snapshot := tracker.Snapshot()
+			if dot {
+				statuses := make(map[string]engine.GraphServiceStatus, len(snapshot))
+				for name, status := range snapshot {
+					statuses[name] = engine.GraphServiceStatus{State: status.State, Ready: status.Ready, Message: status.Message}
+				}
+
+				depMeta := make(map[string]map[string]engine.DependencyMetadata)
+				for name, svc := range doc.File.Services {
+					if svc == nil {
+						continue
+					}
+					for _, dep := range svc.DependsOn {
+						require := dep.Require
+						if require == "" {
+							require = "ready"
+						}
+						meta := engine.DependencyMetadata{Require: require}
+						if status, ok := snapshot[name]; ok && status.State == engine.EventTypeBlocked && status.Message != "" {
+							if strings.Contains(status.Message, dep.Target) {
+								meta.BlockingReason = status.Message
+							}
+						}
+						if _, ok := depMeta[name]; !ok {
+							depMeta[name] = make(map[string]engine.DependencyMetadata)
+						}
+						depMeta[name][dep.Target] = meta
+					}
+				}
+
+				fmt.Fprint(cmd.OutOrStdout(), doc.Graph.DOT(statuses, depMeta))
+				return nil
+			}
 
 			var b strings.Builder
 			services := doc.Graph.Services()
