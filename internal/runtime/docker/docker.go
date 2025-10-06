@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/go-connections/nat"
 
 	"github.com/Paintersrp/orco/internal/probe"
+	"github.com/Paintersrp/orco/internal/resources"
 	"github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/stack"
 )
@@ -613,6 +615,40 @@ func buildConfigs(spec runtime.StartSpec) (*container.Config, *container.HostCon
 			}
 			host.Binds = append(host.Binds, bindSpec)
 		}
+	}
+	if spec.Resources != nil {
+		var limits container.Resources
+		if strings.TrimSpace(spec.Resources.CPU) != "" {
+			nano, err := resources.ParseCPU(spec.Resources.CPU)
+			if err != nil {
+				return nil, nil, fmt.Errorf("parse cpu: %w", err)
+			}
+			if nano > 0 {
+				const cpuPeriod = 100000
+				limits.NanoCPUs = nano
+				limits.CPUPeriod = cpuPeriod
+				quota := (nano*cpuPeriod + resources.NanoCPUs/2) / resources.NanoCPUs
+				if quota < 1 {
+					quota = 1
+				}
+				limits.CPUQuota = quota
+			}
+		}
+		if strings.TrimSpace(spec.Resources.Memory) != "" {
+			bytes, err := resources.ParseMemory(spec.Resources.Memory)
+			if err != nil {
+				return nil, nil, fmt.Errorf("parse memory: %w", err)
+			}
+			limits.Memory = bytes
+		}
+		if strings.TrimSpace(spec.Resources.MemoryReservation) != "" {
+			bytes, err := resources.ParseMemory(spec.Resources.MemoryReservation)
+			if err != nil {
+				return nil, nil, fmt.Errorf("parse memory reservation: %w", err)
+			}
+			limits.MemoryReservation = bytes
+		}
+		host.Resources = limits
 	}
 	return config, host, nil
 }

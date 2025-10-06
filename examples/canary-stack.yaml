@@ -16,6 +16,8 @@ services:
     command: ["sleep", "5"]
     env:
       VERSION: v1
+    resources:
+      cpu: "1.5"
     update:
       strategy: canary
       promoteAfter: 30s
@@ -28,3 +30,5 @@ services:
     command: ["sleep", "2"]
     env:
       API_URL: http://localhost:8080
+    resources:
+      memory: 64Mi

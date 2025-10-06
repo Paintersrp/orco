@@ -154,6 +154,9 @@ func buildStartSpec(name string, replica int, svc *stack.Service) runtime.StartS
 	}
 	spec.Workdir = svc.ResolvedWorkdir
 	spec.Health = svc.Health
+	if svc.Resources != nil {
+		spec.Resources = svc.Resources.Clone()
+	}
 	spec.Service = svc.Clone()
 	return spec
 }

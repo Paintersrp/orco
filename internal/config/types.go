@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/docker/go-connections/nat"
+
+	"github.com/Paintersrp/orco/internal/resources"
 )
 
 // Duration wraps time.Duration for YAML unmarshalling.
@@ -75,7 +77,15 @@ type ServiceSpec struct {
 	Update          *UpdateStrategy   `yaml:"update"`
 	Replicas        int               `yaml:"replicas"`
 	RestartPolicy   *RestartPolicy    `yaml:"restartPolicy"`
+	Resources       *Resources        `yaml:"resources"`
 	ResolvedWorkdir string            `yaml:"-"`
+}
+
+// Resources captures resource constraints requested for a service.
+type Resources struct {
+	CPU               string `yaml:"cpu"`
+	Memory            string `yaml:"memory"`
+	MemoryReservation string `yaml:"memoryReservation"`
 }
 
 // DepEdge describes a dependency edge from one service to another.
@@ -233,6 +243,30 @@ func (s *Stack) Validate() error {
 		for i, volume := range svc.Volumes {
 			if err := validateVolumeSpec(volume); err != nil {
 				return fmt.Errorf("%s: %w", serviceField(name, fmt.Sprintf("volumes[%d]", i)), err)
+			}
+		}
+		if svc.Resources != nil {
+			if strings.TrimSpace(svc.Resources.CPU) != "" {
+				if _, err := resources.ParseCPU(svc.Resources.CPU); err != nil {
+					return fmt.Errorf("%s: %w", serviceField(name, "resources", "cpu"), err)
+				}
+			}
+			var memLimit int64
+			if strings.TrimSpace(svc.Resources.Memory) != "" {
+				bytes, err := resources.ParseMemory(svc.Resources.Memory)
+				if err != nil {
+					return fmt.Errorf("%s: %w", serviceField(name, "resources", "memory"), err)
+				}
+				memLimit = bytes
+			}
+			if strings.TrimSpace(svc.Resources.MemoryReservation) != "" {
+				bytes, err := resources.ParseMemory(svc.Resources.MemoryReservation)
+				if err != nil {
+					return fmt.Errorf("%s: %w", serviceField(name, "resources", "memoryReservation"), err)
+				}
+				if memLimit > 0 && bytes > memLimit {
+					return fmt.Errorf("%s: must be less than or equal to memory limit", serviceField(name, "resources", "memoryReservation"))
+				}
 			}
 		}
 	}
@@ -432,6 +466,9 @@ func (s *ServiceSpec) Clone() *ServiceSpec {
 	if s.RestartPolicy != nil {
 		cp.RestartPolicy = s.RestartPolicy.Clone()
 	}
+	if s.Resources != nil {
+		cp.Resources = s.Resources.Clone()
+	}
 	return &cp
 }
 
@@ -463,6 +500,15 @@ func (p *ProbeSpec) Clone() *ProbeSpec {
 			Levels:  append([]string(nil), p.Log.Levels...),
 		}
 	}
+	return &cp
+}
+
+// Clone creates a deep copy of the resource specification.
+func (r *Resources) Clone() *Resources {
+	if r == nil {
+		return nil
+	}
+	cp := *r
 	return &cp
 }
 
