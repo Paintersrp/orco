@@ -18,4 +18,5 @@ type (
 	UpdatePolicy  = config.UpdateStrategy
 	RestartPolicy = config.RestartPolicy
 	Backoff       = config.BackoffSpec
+	Resources     = config.Resources
 )

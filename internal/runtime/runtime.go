@@ -84,6 +84,9 @@ type StartSpec struct {
 	// Health optionally configures readiness probing for the instance.
 	Health *stack.Health
 
+	// Resources describes requested resource constraints.
+	Resources *stack.Resources
+
 	// Service retains the original stack definition when available. This is
 	// primarily used by existing runtimes that need access to additional
 	// configuration that has not yet been promoted onto StartSpec.

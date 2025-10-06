@@ -24,6 +24,8 @@ services:
     env:
       POSTGRES_PASSWORD: example
     ports: ["5432:5432"]
+    resources:
+      memory: 1Gi
     health:
       http:
         url: http://localhost:5432/healthz
@@ -52,6 +54,10 @@ services:
       expression: http || log
     ports: ["8080:8080"]
     replicas: 2
+    resources:
+      cpu: "750m"
+      memory: 512Mi
+      memoryReservation: 256Mi
     restartPolicy:
       maxRetries: 10
       backoff:
