@@ -113,6 +113,33 @@ func TestStatusTrackerAggregatesReplicaReadiness(t *testing.T) {
 	}
 }
 
+func TestStatusTrackerRecordsOOMError(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStatusTracker()
+	base := time.Now()
+
+	oomErr := errors.New("container terminated by the kernel OOM killer (memory limit 256Mi): container exited with status 137")
+	tracker.Apply(engine.Event{
+		Service:   "api",
+		Replica:   0,
+		Type:      engine.EventTypeCrashed,
+		Err:       oomErr,
+		Timestamp: base,
+	})
+
+	snap := tracker.Snapshot()["api"]
+	if snap.State != engine.EventTypeCrashed {
+		t.Fatalf("expected crashed state, got %q", snap.State)
+	}
+	if !strings.Contains(snap.Message, "OOM killer") {
+		t.Fatalf("expected OOM reason in message, got %q", snap.Message)
+	}
+	if !strings.Contains(snap.Message, "replica 0") {
+		t.Fatalf("expected replica identifier in message, got %q", snap.Message)
+	}
+}
+
 func TestStatusTrackerRedactsSecretsInMessages(t *testing.T) {
 	t.Parallel()
 

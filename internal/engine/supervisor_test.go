@@ -284,6 +284,60 @@ func TestSupervisorMaxRetriesEmitsFailed(t *testing.T) {
 	}
 }
 
+func TestSupervisorPropagatesOOMError(t *testing.T) {
+	svc := &stack.Service{
+		RestartPolicy: &stack.RestartPolicy{MaxRetries: 0},
+	}
+
+	oomErr := errors.New("container terminated by the kernel OOM killer (memory limit 256Mi): container exited with status 137")
+	inst := &fakeInstance{waitErr: oomErr}
+
+	events := make(chan Event, 8)
+	rt := &fakeRuntime{instances: []*fakeInstance{inst}}
+
+	sup := newSupervisor("api", 0, svc, rt, events)
+	sup.jitter = func(d time.Duration) time.Duration { return d }
+	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	sup.Start(context.Background())
+
+	if err := sup.AwaitReady(context.Background()); err != oomErr {
+		t.Fatalf("expected await ready to return OOM error: got %v want %v", err, oomErr)
+	}
+
+	var crash Event
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case evt := <-events:
+			if evt.Service != "api" {
+				continue
+			}
+			if evt.Type == EventTypeCrashed {
+				crash = evt
+				goto done
+			}
+		case <-timeout:
+			t.Fatalf("timed out waiting for crash event")
+		}
+	}
+
+done:
+	if crash.Err == nil {
+		t.Fatalf("expected crash event to include error")
+	}
+	if crash.Err != oomErr {
+		t.Fatalf("crash event error mismatch: got %v want %v", crash.Err, oomErr)
+	}
+	if crash.Err.Error() != oomErr.Error() {
+		t.Fatalf("crash event error message mismatch: got %q want %q", crash.Err.Error(), oomErr.Error())
+	}
+
+	if err := sup.Stop(context.Background()); err != nil {
+		t.Fatalf("stop supervisor: %v", err)
+	}
+}
+
 func TestSupervisorStartFailuresEmitFailedEvent(t *testing.T) {
 	svc := &stack.Service{
 		RestartPolicy: &stack.RestartPolicy{

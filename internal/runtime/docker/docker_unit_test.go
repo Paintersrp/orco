@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/api/types/container"
+
 	"github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/stack"
 )
@@ -91,5 +93,21 @@ func TestBuildConfigsResourcesInvalid(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "parse cpu") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitOutcomeExitErrorOOM(t *testing.T) {
+	outcome := waitOutcome{
+		status:      container.WaitResponse{StatusCode: 137},
+		oomKilled:   true,
+		memoryLimit: "256Mi",
+	}
+	err := waitOutcomeExitError(outcome)
+	if err == nil {
+		t.Fatalf("expected error for oom exit")
+	}
+	want := "container terminated by the kernel OOM killer (memory limit 256Mi): container exited with status 137"
+	if got := err.Error(); got != want {
+		t.Fatalf("unexpected error message: got %q want %q", got, want)
 	}
 }
