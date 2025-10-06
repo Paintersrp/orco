@@ -25,6 +25,9 @@ services:
   api:
     runtime: process
     command: ["sleep", "0"]
+    resources:
+      cpu: "500m"
+      memory: "256Mi"
   db:
     runtime: process
     command: ["sleep", "0"]
@@ -40,6 +43,9 @@ services:
 	output := runStatusCommand(t, ctx)
 	if !strings.Contains(output, "SERVICE") || !strings.Contains(output, "STATE") {
 		t.Fatalf("expected status header, got: %s", output)
+	}
+	if !strings.Contains(output, "CPU/MEM") {
+		t.Fatalf("expected resource column in output, got: %s", output)
 	}
 
 	apiLine := findServiceLine(output, "api")
@@ -69,6 +75,9 @@ services:
 	if !strings.Contains(apiLine, "service ready") {
 		t.Fatalf("expected api ready message, got: %s", apiLine)
 	}
+	if !strings.Contains(apiLine, "500m / 256MiB") {
+		t.Fatalf("expected api resources in output, got: %s", apiLine)
+	}
 
 	dbLine := findServiceLine(output, "db")
 	if !strings.Contains(dbLine, "Ready") {
@@ -76,6 +85,9 @@ services:
 	}
 	if !strings.Contains(dbLine, "1/1") {
 		t.Fatalf("expected db line to include replica readiness, got: %s", dbLine)
+	}
+	if !strings.Contains(dbLine, "-") {
+		t.Fatalf("expected db resources placeholder in output, got: %s", dbLine)
 	}
 }
 
