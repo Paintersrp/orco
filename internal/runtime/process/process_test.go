@@ -398,6 +398,62 @@ func TestStartPreservesBaseEnvironment(t *testing.T) {
 	}
 }
 
+func TestStartWarnsOnResourceHints(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("process runtime tests skipped on windows")
+	}
+
+	spec := runtimelib.StartSpec{
+		Name:    "resource-hints",
+		Command: []string{"/bin/sh", "-c", "sleep 5"},
+		Resources: &stack.Resources{
+			CPU:    "750m",
+			Memory: "128Mi",
+		},
+	}
+
+	inst, err := New().Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("start service: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		if err := inst.Stop(stopCtx); err != nil {
+			t.Logf("stop returned error: %v", err)
+		}
+	})
+
+	logs, err := inst.Logs(context.Background())
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+
+	select {
+	case entry, ok := <-logs:
+		if !ok {
+			t.Fatal("logs channel closed before emitting warning")
+		}
+		if entry.Source != runtimelib.LogSourceSystem {
+			t.Fatalf("unexpected log source: got %q want %q", entry.Source, runtimelib.LogSourceSystem)
+		}
+		if entry.Level != "warn" {
+			t.Fatalf("unexpected log level: got %q want %q", entry.Level, "warn")
+		}
+		if !strings.Contains(entry.Message, "cannot be enforced") {
+			t.Fatalf("warning does not explain enforcement failure: %q", entry.Message)
+		}
+		if !strings.Contains(entry.Message, "cpu=750m") {
+			t.Fatalf("warning missing cpu hint: %q", entry.Message)
+		}
+		if !strings.Contains(entry.Message, "memory=128Mi") {
+			t.Fatalf("warning missing memory hint: %q", entry.Message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for warning log entry")
+	}
+}
+
 func TestStartSetsWorkingDirectory(t *testing.T) {
 	if stdruntime.GOOS == "windows" {
 		t.Skip("process runtime tests skipped on windows")

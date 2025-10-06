@@ -75,6 +75,26 @@ func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtim
 		health:   health,
 	}
 
+	if spec.Resources != nil {
+		var hints []string
+		if spec.Resources.CPU != "" {
+			hints = append(hints, fmt.Sprintf("cpu=%s", spec.Resources.CPU))
+		}
+		if spec.Resources.Memory != "" {
+			hints = append(hints, fmt.Sprintf("memory=%s", spec.Resources.Memory))
+		}
+		if spec.Resources.MemoryReservation != "" {
+			hints = append(hints, fmt.Sprintf("memoryReservation=%s", spec.Resources.MemoryReservation))
+		}
+		if len(hints) > 0 {
+			inst.logs <- runtime.LogEntry{
+				Message: fmt.Sprintf("requested resource hints (%s) cannot be enforced by the process runtime", strings.Join(hints, ", ")),
+				Source:  runtime.LogSourceSystem,
+				Level:   "warn",
+			}
+		}
+	}
+
 	if inst.health != nil {
 		prober, err := probe.New(inst.health)
 		if err != nil {
