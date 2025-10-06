@@ -75,6 +75,9 @@ func TestBuildConfigsResources(t *testing.T) {
 	if got, want := hostCfg.Resources.Memory, int64(268435456); got != want {
 		t.Fatalf("unexpected memory limit: got %d want %d", got, want)
 	}
+	if got, want := hostCfg.Resources.MemorySwap, int64(268435456); got != want {
+		t.Fatalf("unexpected memory swap limit: got %d want %d", got, want)
+	}
 	if got, want := hostCfg.Resources.MemoryReservation, int64(134217728); got != want {
 		t.Fatalf("unexpected memory reservation: got %d want %d", got, want)
 	}
