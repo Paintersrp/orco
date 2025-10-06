@@ -86,7 +86,11 @@ func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtim
 		health = spec.Service.Health.Clone()
 	}
 
-	inst := newDockerInstance(cli, containerID, spec.Name, health)
+	memoryLimit := ""
+	if spec.Resources != nil {
+		memoryLimit = spec.Resources.Memory
+	}
+	inst := newDockerInstance(cli, containerID, spec.Name, health, memoryLimit)
 
 	if inst.health == nil {
 		inst.signalReady(nil)
@@ -119,6 +123,7 @@ type dockerInstance struct {
 	name         string
 	health       *stack.Health
 	healthProber probe.Prober
+	memoryLimit  string
 
 	logs    chan runtime.LogEntry
 	logCtx  context.Context
@@ -146,11 +151,13 @@ type dockerInstance struct {
 }
 
 type waitOutcome struct {
-	status container.WaitResponse
-	err    error
+	status      container.WaitResponse
+	err         error
+	oomKilled   bool
+	memoryLimit string
 }
 
-func newDockerInstance(cli *client.Client, id string, name string, health *stack.Health) *dockerInstance {
+func newDockerInstance(cli *client.Client, id string, name string, health *stack.Health, memoryLimit string) *dockerInstance {
 	logCtx, logCancel := context.WithCancel(context.Background())
 	healthCtx, healthCancel := context.WithCancel(context.Background())
 	return &dockerInstance{
@@ -158,6 +165,7 @@ func newDockerInstance(cli *client.Client, id string, name string, health *stack
 		containerID:  id,
 		name:         name,
 		health:       health,
+		memoryLimit:  strings.TrimSpace(memoryLimit),
 		logs:         make(chan runtime.LogEntry, 128),
 		logCtx:       logCtx,
 		logStop:      logCancel,
@@ -244,6 +252,7 @@ func (i *dockerInstance) startWaiter() {
 				errCh = nil
 			}
 		}
+		i.annotateWaitOutcome(&outcome)
 		i.setWaitOutcome(outcome)
 	}()
 }
@@ -253,6 +262,27 @@ func (i *dockerInstance) setWaitOutcome(outcome waitOutcome) {
 		i.waitResult = outcome
 		close(i.waitDone)
 	})
+}
+
+func (i *dockerInstance) annotateWaitOutcome(outcome *waitOutcome) {
+	outcome.memoryLimit = i.memoryLimit
+	inspect, err := i.cli.ContainerInspect(context.Background(), i.containerID)
+	if err != nil {
+		return
+	}
+
+	state := inspect.State
+	if state != nil {
+		if outcome.status.StatusCode == 0 && state.ExitCode != 0 {
+			outcome.status.StatusCode = int64(state.ExitCode)
+		}
+		if state.OOMKilled {
+			outcome.oomKilled = true
+		}
+	}
+	if outcome.status.StatusCode == 137 {
+		outcome.oomKilled = true
+	}
 }
 
 func (i *dockerInstance) signalReady(err error) {
@@ -458,34 +488,48 @@ func (i *dockerInstance) Logs(ctx context.Context) (<-chan runtime.LogEntry, err
 
 func waitOutcomeError(outcome waitOutcome) error {
 	if outcome.err != nil {
-		return outcome.err
+		return wrapOOMError(outcome.err, outcome)
 	}
 	if outcome.status.Error != nil {
 		if outcome.status.StatusCode != 0 {
-			return fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message)
+			return wrapOOMError(fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message), outcome)
 		}
-		return errors.New(outcome.status.Error.Message)
+		return wrapOOMError(errors.New(outcome.status.Error.Message), outcome)
 	}
 	if outcome.status.StatusCode != 0 {
-		return fmt.Errorf("container exited with status %d", outcome.status.StatusCode)
+		return wrapOOMError(fmt.Errorf("container exited with status %d", outcome.status.StatusCode), outcome)
 	}
-	return errors.New("container exited before ready")
+	return wrapOOMError(errors.New("container exited before ready"), outcome)
 }
 
 func waitOutcomeExitError(outcome waitOutcome) error {
 	if outcome.err != nil {
-		return outcome.err
+		return wrapOOMError(outcome.err, outcome)
 	}
 	if outcome.status.Error != nil {
 		if outcome.status.StatusCode != 0 {
-			return fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message)
+			return wrapOOMError(fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message), outcome)
 		}
-		return errors.New(outcome.status.Error.Message)
+		return wrapOOMError(errors.New(outcome.status.Error.Message), outcome)
 	}
 	if outcome.status.StatusCode != 0 {
-		return fmt.Errorf("container exited with status %d", outcome.status.StatusCode)
+		return wrapOOMError(fmt.Errorf("container exited with status %d", outcome.status.StatusCode), outcome)
 	}
 	return nil
+}
+
+func wrapOOMError(err error, outcome waitOutcome) error {
+	if err == nil {
+		return nil
+	}
+	if !outcome.oomKilled {
+		return err
+	}
+	limit := strings.TrimSpace(outcome.memoryLimit)
+	if limit != "" {
+		return fmt.Errorf("container terminated by the kernel OOM killer (memory limit %s): %w", limit, err)
+	}
+	return fmt.Errorf("container terminated by the kernel OOM killer: %w", err)
 }
 
 type logWriter struct {
