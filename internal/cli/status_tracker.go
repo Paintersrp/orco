@@ -204,18 +204,27 @@ func (t *statusTracker) Apply(evt engine.Event) {
 }
 
 func formatEventMessage(evt engine.Event) string {
-	message := ""
-	if evt.Message != "" {
-		message = evt.Message
-	} else if evt.Err != nil {
-		message = evt.Err.Error()
+	message := strings.TrimSpace(evt.Message)
+	errMsg := ""
+	if evt.Err != nil {
+		errMsg = strings.TrimSpace(evt.Err.Error())
 	}
-	if evt.Replica >= 0 && message != "" {
-		message = fmt.Sprintf("replica %d: %s", evt.Replica, message)
+
+	switch {
+	case message != "" && errMsg != "":
+		message = fmt.Sprintf("%s: %s", message, errMsg)
+	case message == "" && errMsg != "":
+		message = errMsg
 	}
-	if evt.Replica >= 0 && message == "" {
-		message = fmt.Sprintf("replica %d", evt.Replica)
+
+	if evt.Replica >= 0 {
+		if message != "" {
+			message = fmt.Sprintf("replica %d: %s", evt.Replica, message)
+		} else {
+			message = fmt.Sprintf("replica %d", evt.Replica)
+		}
 	}
+
 	return cliutil.RedactSecrets(message)
 }
 

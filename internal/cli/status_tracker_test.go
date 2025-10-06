@@ -124,6 +124,7 @@ func TestStatusTrackerRecordsOOMError(t *testing.T) {
 		Service:   "api",
 		Replica:   0,
 		Type:      engine.EventTypeCrashed,
+		Message:   "instance crashed",
 		Err:       oomErr,
 		Timestamp: base,
 	})
@@ -131,6 +132,9 @@ func TestStatusTrackerRecordsOOMError(t *testing.T) {
 	snap := tracker.Snapshot()["api"]
 	if snap.State != engine.EventTypeCrashed {
 		t.Fatalf("expected crashed state, got %q", snap.State)
+	}
+	if !strings.Contains(snap.Message, "instance crashed") {
+		t.Fatalf("expected event message to be included, got %q", snap.Message)
 	}
 	if !strings.Contains(snap.Message, "OOM killer") {
 		t.Fatalf("expected OOM reason in message, got %q", snap.Message)
