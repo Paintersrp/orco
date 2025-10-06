@@ -684,6 +684,11 @@ func buildConfigs(spec runtime.StartSpec) (*container.Config, *container.HostCon
 				return nil, nil, fmt.Errorf("parse memory: %w", err)
 			}
 			limits.Memory = bytes
+			// With cgroups v2 Docker requires the swap limit to be set
+			// alongside the memory limit to enforce hard caps. Matching
+			// the values disables swap usage and mirrors the behavior
+			// expected by resource hints.
+			limits.MemorySwap = bytes
 		}
 		if strings.TrimSpace(spec.Resources.MemoryReservation) != "" {
 			bytes, err := resources.ParseMemory(spec.Resources.MemoryReservation)
