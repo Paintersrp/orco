@@ -179,6 +179,36 @@ func TestStatusTrackerTracksPromotionStates(t *testing.T) {
 	}
 }
 
+func TestStatusTrackerSetResourceHints(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStatusTracker()
+	base := time.Now()
+
+	tracker.Apply(engine.Event{Service: "api", Replica: -1, Type: engine.EventTypeStarting, Timestamp: base})
+
+	tracker.SetResourceHints(map[string]ResourceHint{
+		"api": {
+			CPU:    "500m",
+			Memory: "256MiB",
+		},
+	})
+
+	snap := tracker.Snapshot()["api"]
+	if snap.Resources.CPU != "500m" {
+		t.Fatalf("expected cpu hint to be recorded, got %q", snap.Resources.CPU)
+	}
+	if snap.Resources.Memory != "256MiB" {
+		t.Fatalf("expected memory hint to be recorded, got %q", snap.Resources.Memory)
+	}
+
+	tracker.SetResourceHints(map[string]ResourceHint{})
+	snap = tracker.Snapshot()["api"]
+	if snap.Resources.CPU != "" || snap.Resources.Memory != "" {
+		t.Fatalf("expected hints to reset when absent, got %+v", snap.Resources)
+	}
+}
+
 func TestStatusTrackerHistoryRingBuffer(t *testing.T) {
 	t.Parallel()
 

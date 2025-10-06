@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,6 +82,8 @@ type serviceStatus struct {
 	replicaCount  int
 	replicas      map[int]*replicaStatus
 	readyReplicas int
+
+	resources ResourceHint
 
 	history         []ServiceTransition
 	historyCapacity int
@@ -288,6 +291,7 @@ type ServiceStatus struct {
 	Replicas      int
 	ReadyReplicas int
 	Message       string
+	Resources     ResourceHint
 }
 
 // Snapshot returns a map keyed by service name containing copies of the tracked state.
@@ -307,9 +311,36 @@ func (t *statusTracker) Snapshot() map[string]ServiceStatus {
 			Replicas:      state.replicaCount,
 			ReadyReplicas: state.readyReplicas,
 			Message:       state.message,
+			Resources:     state.resources,
 		}
 	}
 	return snapshot
+}
+
+// ResourceHint captures formatted CPU and memory hints for display purposes.
+type ResourceHint struct {
+	CPU    string
+	Memory string
+}
+
+// SetResourceHints associates formatted CPU and memory hints with known services.
+func (t *statusTracker) SetResourceHints(hints map[string]ResourceHint) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, state := range t.services {
+		state.resources = ResourceHint{}
+	}
+	for name, hint := range hints {
+		state, ok := t.services[name]
+		if !ok {
+			continue
+		}
+		state.resources = ResourceHint{
+			CPU:    strings.TrimSpace(hint.CPU),
+			Memory: strings.TrimSpace(hint.Memory),
+		}
+	}
 }
 
 // History returns up to the last n transitions observed for a service in
