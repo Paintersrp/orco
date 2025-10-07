@@ -1,11 +1,18 @@
 package logmux
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Paintersrp/orco/internal/engine"
 	"github.com/Paintersrp/orco/internal/runtime"
@@ -21,6 +28,8 @@ type Mux struct {
 	mu     sync.Mutex
 	drops  map[string]dropRecord
 	inputs sync.WaitGroup
+
+	sink *fileSink
 }
 
 type dropRecord struct {
@@ -30,13 +39,18 @@ type dropRecord struct {
 
 // New constructs a mux backed by a channel of the provided size. A size of
 // zero results in a minimally buffered channel.
-func New(size int) *Mux {
+func New(size int, opts ...SinkOption) *Mux {
 	if size <= 0 {
 		size = 1
+	}
+	cfg := sinkConfig{now: time.Now}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 	return &Mux{
 		out:   make(chan engine.Event, size),
 		drops: make(map[string]dropRecord),
+		sink:  newFileSink(cfg),
 	}
 }
 
@@ -69,15 +83,24 @@ func (m *Mux) Close() {
 	m.inputs.Wait()
 	m.flushDrops()
 	close(m.out)
+	if m.sink != nil {
+		m.sink.Close()
+	}
 }
 
 func (m *Mux) deliver(evt engine.Event) {
 	if !m.flushPending(evt.Service) {
+		if evt.Type == engine.EventTypeLog {
+			m.write(evt)
+		}
 		m.recordDrop(evt.Service, evt.Attempt)
 		return
 	}
 	if m.trySend(evt) {
 		return
+	}
+	if evt.Type == engine.EventTypeLog {
+		m.write(evt)
 	}
 	m.recordDrop(evt.Service, evt.Attempt)
 }
@@ -153,6 +176,9 @@ func (m *Mux) collectDrops() map[string]dropRecord {
 func (m *Mux) trySend(evt engine.Event) bool {
 	select {
 	case m.out <- evt:
+		if evt.Type == engine.EventTypeLog {
+			m.write(evt)
+		}
 		return true
 	default:
 		return false
@@ -161,6 +187,16 @@ func (m *Mux) trySend(evt engine.Event) bool {
 
 func (m *Mux) blockingSend(evt engine.Event) {
 	m.out <- evt
+	if evt.Type == engine.EventTypeLog {
+		m.write(evt)
+	}
+}
+
+func (m *Mux) write(evt engine.Event) {
+	if m.sink == nil {
+		return
+	}
+	_ = m.sink.Write(evt)
 }
 
 func normalize(evt engine.Event) engine.Event {
@@ -196,5 +232,283 @@ func synthesizeDropEvent(service string, rec dropRecord) engine.Event {
 		Level:     "warn",
 		Source:    runtime.LogSourceSystem,
 		Attempt:   rec.attempt,
+	}
+}
+
+// SinkOption mutates the configuration used to construct a log sink.
+type SinkOption func(*sinkConfig)
+
+// WithDirectory configures the sink to store logs beneath the provided
+// directory. A per-service subdirectory is created as events are observed.
+func WithDirectory(dir string) SinkOption {
+	return func(cfg *sinkConfig) {
+		cfg.directory = dir
+	}
+}
+
+// WithMaxFileSize sets the maximum size of an individual log file before the
+// sink performs a rotation. Sizes of zero or less disable size-based rotation.
+func WithMaxFileSize(size int64) SinkOption {
+	return func(cfg *sinkConfig) {
+		if size > 0 {
+			cfg.maxFileSize = size
+		}
+	}
+}
+
+// WithMaxTotalSize bounds the total bytes retained for a service. The sink
+// prunes the oldest files once the sum of retained log files exceeds the limit.
+func WithMaxTotalSize(size int64) SinkOption {
+	return func(cfg *sinkConfig) {
+		if size > 0 {
+			cfg.maxTotalSize = size
+		}
+	}
+}
+
+// WithMaxFileAge specifies the maximum age of a log file before it is rotated
+// and pruned. Durations of zero or less disable age-based retention.
+func WithMaxFileAge(age time.Duration) SinkOption {
+	return func(cfg *sinkConfig) {
+		if age > 0 {
+			cfg.maxFileAge = age
+		}
+	}
+}
+
+type sinkConfig struct {
+	directory    string
+	maxFileSize  int64
+	maxTotalSize int64
+	maxFileAge   time.Duration
+	now          func() time.Time
+}
+
+func newFileSink(cfg sinkConfig) *fileSink {
+	if cfg.directory == "" {
+		return nil
+	}
+	if cfg.now == nil {
+		cfg.now = time.Now
+	}
+	return &fileSink{
+		cfg:      cfg,
+		services: make(map[string]*serviceSink),
+	}
+}
+
+type fileSink struct {
+	cfg      sinkConfig
+	mu       sync.Mutex
+	services map[string]*serviceSink
+}
+
+func (s *fileSink) Write(evt engine.Event) error {
+	if evt.Service == "" {
+		return nil
+	}
+	service := sanitizeComponent(evt.Service)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	writer, ok := s.services[service]
+	if !ok {
+		writer = &serviceSink{sink: s, service: service}
+		s.services[service] = writer
+	}
+	return writer.write(evt)
+}
+
+func (s *fileSink) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, writer := range s.services {
+		writer.close()
+		delete(s.services, key)
+	}
+}
+
+type serviceSink struct {
+	sink    *fileSink
+	service string
+	file    *os.File
+	size    int64
+	created time.Time
+	path    string
+}
+
+func (s *serviceSink) write(evt engine.Event) error {
+	if err := s.ensureFile(); err != nil {
+		return err
+	}
+	if s.shouldRotate() {
+		if err := s.rotate(); err != nil {
+			return err
+		}
+	}
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	n, err := s.file.Write(payload)
+	if err != nil {
+		return err
+	}
+	s.size += int64(n)
+	s.prune()
+	return nil
+}
+
+func (s *serviceSink) ensureFile() error {
+	if s.file != nil {
+		return nil
+	}
+	return s.rotate()
+}
+
+func (s *serviceSink) rotate() error {
+	if s.file != nil {
+		_ = s.file.Close()
+	}
+	dir := filepath.Join(s.sink.cfg.directory, s.service)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	attempt := 0
+	for {
+		timestamp := s.sink.cfg.now().UTC().Format("20060102T150405.000000000")
+		name := timestamp
+		if attempt > 0 {
+			name = fmt.Sprintf("%s-%d", timestamp, attempt)
+		}
+		path := filepath.Join(dir, name+".ndjson")
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+		if errors.Is(err, os.ErrExist) {
+			attempt++
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		s.file = file
+		s.size = 0
+		s.created = s.sink.cfg.now()
+		s.path = path
+		break
+	}
+	return nil
+}
+
+func (s *serviceSink) shouldRotate() bool {
+	cfg := s.sink.cfg
+	if cfg.maxFileSize > 0 && s.size >= cfg.maxFileSize {
+		return true
+	}
+	if cfg.maxFileAge > 0 && !s.created.IsZero() && cfg.now().Sub(s.created) >= cfg.maxFileAge {
+		return true
+	}
+	return false
+}
+
+func (s *serviceSink) prune() {
+	cfg := s.sink.cfg
+	if cfg.maxFileAge <= 0 && cfg.maxTotalSize <= 0 {
+		return
+	}
+	dir := filepath.Join(cfg.directory, s.service)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type info struct {
+		entry os.DirEntry
+		path  string
+		stat  fs.FileInfo
+	}
+	var files []info
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		stat, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		files = append(files, info{entry: entry, path: path, stat: stat})
+		total += stat.Size()
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].stat.ModTime().Before(files[j].stat.ModTime())
+	})
+	if cfg.maxFileAge > 0 {
+		cutoff := cfg.now().Add(-cfg.maxFileAge)
+		var retained []info
+		for _, file := range files {
+			if file.path == s.path {
+				retained = append(retained, file)
+				continue
+			}
+			if file.stat.ModTime().Before(cutoff) {
+				if err := os.Remove(file.path); err == nil {
+					total -= file.stat.Size()
+				}
+				continue
+			}
+			retained = append(retained, file)
+		}
+		files = retained
+	}
+	if cfg.maxTotalSize > 0 {
+		i := 0
+		for total > cfg.maxTotalSize && i < len(files) {
+			file := files[i]
+			i++
+			if file.path == s.path {
+				continue
+			}
+			if err := os.Remove(file.path); err == nil {
+				total -= file.stat.Size()
+			}
+		}
+	}
+}
+
+func (s *serviceSink) close() {
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
+}
+
+func sanitizeComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "service"
+	}
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			return unicode.ToLower(r)
+		case r == '-', r == '_', r == '.':
+			return r
+		default:
+			return '_'
+		}
+	}, value)
+	value = strings.Trim(value, "._")
+	if value == "" {
+		return "service"
+	}
+	return value
+}
+
+// withClock injects a deterministic clock. It is intended for testing.
+func withClock(clock func() time.Time) SinkOption {
+	return func(cfg *sinkConfig) {
+		if clock != nil {
+			cfg.now = clock
+		}
 	}
 }
