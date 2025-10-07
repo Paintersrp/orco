@@ -276,11 +276,22 @@ func WithMaxFileAge(age time.Duration) SinkOption {
 	}
 }
 
+// WithMaxFileCount limits the number of log files retained per service. Values
+// of zero or less disable count-based pruning.
+func WithMaxFileCount(count int) SinkOption {
+	return func(cfg *sinkConfig) {
+		if count > 0 {
+			cfg.maxFileCount = count
+		}
+	}
+}
+
 type sinkConfig struct {
 	directory    string
 	maxFileSize  int64
 	maxTotalSize int64
 	maxFileAge   time.Duration
+	maxFileCount int
 	now          func() time.Time
 }
 
@@ -412,7 +423,7 @@ func (s *serviceSink) shouldRotate() bool {
 
 func (s *serviceSink) prune() {
 	cfg := s.sink.cfg
-	if cfg.maxFileAge <= 0 && cfg.maxTotalSize <= 0 {
+	if cfg.maxFileAge <= 0 && cfg.maxTotalSize <= 0 && cfg.maxFileCount <= 0 {
 		return
 	}
 	dir := filepath.Join(cfg.directory, s.service)
@@ -460,16 +471,31 @@ func (s *serviceSink) prune() {
 		}
 		files = retained
 	}
+	if cfg.maxFileCount > 0 {
+		remaining := len(files)
+		for i := 0; remaining > cfg.maxFileCount && i < len(files); i++ {
+			file := files[i]
+			if file.path == "" || file.path == s.path {
+				continue
+			}
+			if err := os.Remove(file.path); err == nil {
+				total -= file.stat.Size()
+				remaining--
+				files[i].path = ""
+			}
+		}
+	}
 	if cfg.maxTotalSize > 0 {
 		i := 0
 		for total > cfg.maxTotalSize && i < len(files) {
 			file := files[i]
 			i++
-			if file.path == s.path {
+			if file.path == "" || file.path == s.path {
 				continue
 			}
 			if err := os.Remove(file.path); err == nil {
 				total -= file.stat.Size()
+				files[i-1].path = ""
 			}
 		}
 	}
