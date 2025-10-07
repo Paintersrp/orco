@@ -176,7 +176,7 @@ func (c *context) statusTracker() *statusTracker {
 	return c.tracker
 }
 
-func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan engine.Event, func()) {
+func (c *context) trackEvents(stackName string, events <-chan engine.Event, buffer int) (<-chan engine.Event, func()) {
 	tracker := c.statusTracker()
 	if buffer <= 0 {
 		buffer = 1
@@ -190,6 +190,9 @@ func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan en
 
 	out := make(chan engine.Event, buffer)
 	logOpts := c.logSinkOptions()
+	if stackName != "" {
+		logOpts = append(logOpts, logmux.WithStackName(stackName))
+	}
 	logMux := logmux.New(buffer, logOpts...)
 	logInput := make(chan engine.Event, buffer)
 	logMux.Add(logInput)
@@ -220,13 +223,7 @@ func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan en
 					}
 					continue
 				}
-				if evt.Type == engine.EventTypeLog {
-					logInput <- evt
-					continue
-				}
-				tracker.Apply(evt)
-				out <- evt
-				stream.Publish(evt)
+				logInput <- evt
 			case evt, ok := <-logOutput:
 				if !ok {
 					logOutput = nil

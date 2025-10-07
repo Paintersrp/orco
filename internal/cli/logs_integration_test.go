@@ -198,7 +198,7 @@ func startDeployment(t *testing.T, ctx *context) {
 	}
 
 	events := make(chan engine.Event, 256)
-	tracked, release := ctx.trackEvents(events, cap(events))
+	tracked, release := ctx.trackEvents(doc.File.Stack.Name, events, cap(events))
 	drained := make(chan struct{})
 	go func() {
 		for range tracked {

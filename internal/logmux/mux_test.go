@@ -132,6 +132,61 @@ func TestMuxPersistsNormalizedEvents(t *testing.T) {
 	}
 }
 
+func TestMuxPersistsLifecycleEventsWithStackDirectories(t *testing.T) {
+	dir := t.TempDir()
+	mux := New(4, WithDirectory(dir), WithStackName("Demo Stack"))
+	src := make(chan engine.Event, 2)
+	mux.Add(src)
+
+	go func() {
+		src <- engine.Event{Service: "api", Type: engine.EventTypeReady, Message: "service ready"}
+		src <- engine.Event{Service: "api", Type: engine.EventTypeLog, Message: "INFO: log line"}
+		close(src)
+	}()
+
+	go mux.Close()
+	for range mux.Output() {
+	}
+
+	serviceDir := filepath.Join(dir, "demo_stack", "api")
+	entries, err := os.ReadDir(serviceDir)
+	if err != nil {
+		t.Fatalf("expected log directory with stack grouping: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected a single log file, got %d", len(entries))
+	}
+
+	file, err := os.Open(filepath.Join(serviceDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	var records []engine.Event
+	for scanner.Scan() {
+		var evt engine.Event
+		if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		records = append(records, evt)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	if len(records) != 2 {
+		t.Fatalf("expected two events, got %d", len(records))
+	}
+	if records[0].Type != engine.EventTypeReady {
+		t.Fatalf("expected lifecycle event persisted first, got %s", records[0].Type)
+	}
+	if records[1].Type != engine.EventTypeLog || records[1].Level != "info" {
+		t.Fatalf("expected normalized log event, got %+v", records[1])
+	}
+}
+
 func TestMuxRotatesAndPrunesLogs(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Unix(0, 0)}
