@@ -37,8 +37,13 @@ services:
 		orchestrator: engine.NewOrchestrator(runtime.Registry{"process": rt}),
 	}
 
+	doc, err := ctx.loadStack()
+	if err != nil {
+		t.Fatalf("load stack: %v", err)
+	}
+
 	events := make(chan engine.Event, 128)
-	trackedEvents, release := ctx.trackEvents(events, cap(events))
+	trackedEvents, release := ctx.trackEvents(doc.File.Stack.Name, events, cap(events))
 	defer release()
 
 	done := make(chan struct{})
@@ -47,11 +52,6 @@ services:
 		}
 		close(done)
 	}()
-
-	doc, err := ctx.loadStack()
-	if err != nil {
-		t.Fatalf("load stack: %v", err)
-	}
 
 	deployment, err := ctx.getOrchestrator().Up(stdcontext.Background(), doc.File, doc.Graph, events)
 	if err != nil {
@@ -143,8 +143,13 @@ services:
 		orchestrator: engine.NewOrchestrator(runtime.Registry{"process": rt}),
 	}
 
+	doc, err := ctx.loadStack()
+	if err != nil {
+		t.Fatalf("load stack: %v", err)
+	}
+
 	events := make(chan engine.Event, 128)
-	trackedEvents, release := ctx.trackEvents(events, cap(events))
+	trackedEvents, release := ctx.trackEvents(doc.File.Stack.Name, events, cap(events))
 	defer release()
 
 	done := make(chan struct{})
@@ -153,11 +158,6 @@ services:
 		}
 		close(done)
 	}()
-
-	doc, err := ctx.loadStack()
-	if err != nil {
-		t.Fatalf("load stack: %v", err)
-	}
 
 	deployment, err := ctx.getOrchestrator().Up(stdcontext.Background(), doc.File, doc.Graph, events)
 	if err != nil {

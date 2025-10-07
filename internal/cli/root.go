@@ -176,7 +176,7 @@ func (c *context) statusTracker() *statusTracker {
 	return c.tracker
 }
 
-func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan engine.Event, func()) {
+func (c *context) trackEvents(stackName string, events <-chan engine.Event, buffer int) (<-chan engine.Event, func()) {
 	tracker := c.statusTracker()
 	if buffer <= 0 {
 		buffer = 1
@@ -189,7 +189,7 @@ func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan en
 	c.mu.Unlock()
 
 	out := make(chan engine.Event, buffer)
-	logOpts := c.logSinkOptions()
+	logOpts := c.logSinkOptions(stackName)
 	logMux := logmux.New(buffer, logOpts...)
 	logInput := make(chan engine.Event, buffer)
 	logMux.Add(logInput)
@@ -265,12 +265,15 @@ func (c *context) subscribeLogStream(buffer int) (<-chan engine.Event, func(), b
 	return stream.Subscribe(buffer)
 }
 
-func (c *context) logSinkOptions() []logmux.SinkOption {
+func (c *context) logSinkOptions(stackName string) []logmux.SinkOption {
 	cfg := c.logRetention
 	if cfg == nil || cfg.Directory == "" {
 		return nil
 	}
 	opts := []logmux.SinkOption{logmux.WithDirectory(cfg.Directory)}
+	if stackName != "" {
+		opts = append(opts, logmux.WithStack(stackName))
+	}
 	if cfg.MaxFileSize > 0 {
 		opts = append(opts, logmux.WithMaxFileSize(cfg.MaxFileSize))
 	}

@@ -246,6 +246,16 @@ func WithDirectory(dir string) SinkOption {
 	}
 }
 
+// WithStack scopes the sink to the provided stack name, nesting service
+// directories beneath the stack directory.
+func WithStack(name string) SinkOption {
+	return func(cfg *sinkConfig) {
+		if name != "" {
+			cfg.stack = sanitizeStackName(name)
+		}
+	}
+}
+
 // WithMaxFileSize sets the maximum size of an individual log file before the
 // sink performs a rotation. Sizes of zero or less disable size-based rotation.
 func WithMaxFileSize(size int64) SinkOption {
@@ -288,6 +298,7 @@ func WithMaxFileCount(count int) SinkOption {
 
 type sinkConfig struct {
 	directory    string
+	stack        string
 	maxFileSize  int64
 	maxTotalSize int64
 	maxFileAge   time.Duration
@@ -381,7 +392,7 @@ func (s *serviceSink) rotate() error {
 	if s.file != nil {
 		_ = s.file.Close()
 	}
-	dir := filepath.Join(s.sink.cfg.directory, s.service)
+	dir := filepath.Join(s.sink.directory(), s.service)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -426,7 +437,7 @@ func (s *serviceSink) prune() {
 	if cfg.maxFileAge <= 0 && cfg.maxTotalSize <= 0 && cfg.maxFileCount <= 0 {
 		return
 	}
-	dir := filepath.Join(cfg.directory, s.service)
+	dir := filepath.Join(s.sink.directory(), s.service)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -508,10 +519,25 @@ func (s *serviceSink) close() {
 	}
 }
 
+func (s *fileSink) directory() string {
+	if s.cfg.stack != "" {
+		return filepath.Join(s.cfg.directory, s.cfg.stack)
+	}
+	return s.cfg.directory
+}
+
 func sanitizeComponent(value string) string {
+	return sanitizeName(value, "service")
+}
+
+func sanitizeStackName(value string) string {
+	return sanitizeName(value, "stack")
+}
+
+func sanitizeName(value, fallback string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "service"
+		return fallback
 	}
 	value = strings.Map(func(r rune) rune {
 		switch {
@@ -525,7 +551,7 @@ func sanitizeComponent(value string) string {
 	}, value)
 	value = strings.Trim(value, "._")
 	if value == "" {
-		return "service"
+		return fallback
 	}
 	return value
 }

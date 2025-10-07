@@ -11,6 +11,7 @@ import (
 
 type sinkConfigView struct {
 	Directory    string
+	Stack        string
 	MaxFileSize  int64
 	MaxTotalSize int64
 	MaxFileAge   time.Duration
@@ -35,6 +36,7 @@ func extractSinkConfig(t *testing.T, opts []logmux.SinkOption) sinkConfigView {
 	cfgVal := reflect.NewAt(cfgField.Type(), cfgPtr).Elem()
 	return sinkConfigView{
 		Directory:    cfgVal.FieldByName("directory").String(),
+		Stack:        cfgVal.FieldByName("stack").String(),
 		MaxFileSize:  cfgVal.FieldByName("maxFileSize").Int(),
 		MaxTotalSize: cfgVal.FieldByName("maxTotalSize").Int(),
 		MaxFileAge:   time.Duration(cfgVal.FieldByName("maxFileAge").Int()),
@@ -55,9 +57,12 @@ func TestRootCommandLogRetentionFromEnv(t *testing.T) {
 		t.Fatalf("expected directory %s, got %s", dir, ctx.logRetention.Directory)
 	}
 
-	cfg := extractSinkConfig(t, ctx.logSinkOptions())
+	cfg := extractSinkConfig(t, ctx.logSinkOptions("Demo"))
 	if cfg.Directory != dir {
 		t.Fatalf("expected sink directory %s, got %s", dir, cfg.Directory)
+	}
+	if cfg.Stack != "demo" {
+		t.Fatalf("expected stack directory demo, got %s", cfg.Stack)
 	}
 	if cfg.MaxFileSize != 128 {
 		t.Fatalf("expected max file size 128, got %d", cfg.MaxFileSize)
@@ -106,9 +111,12 @@ func TestRootCommandLogRetentionFlagsOverride(t *testing.T) {
 		t.Fatalf("expected overridden directory %s, got %s", overrideDir, ctx.logRetention.Directory)
 	}
 
-	cfg := extractSinkConfig(t, ctx.logSinkOptions())
+	cfg := extractSinkConfig(t, ctx.logSinkOptions("demo"))
 	if cfg.Directory != overrideDir {
 		t.Fatalf("expected sink directory %s, got %s", overrideDir, cfg.Directory)
+	}
+	if cfg.Stack != "demo" {
+		t.Fatalf("expected stack directory demo, got %s", cfg.Stack)
 	}
 	if cfg.MaxFileSize != 256 {
 		t.Fatalf("expected max file size 256, got %d", cfg.MaxFileSize)

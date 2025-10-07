@@ -132,6 +132,33 @@ func TestMuxPersistsNormalizedEvents(t *testing.T) {
 	}
 }
 
+func TestMuxScopesLogsByStack(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	mux := New(1, WithDirectory(dir), WithStack("Prod Stack"), withClock(clock.Now))
+	src := make(chan engine.Event, 1)
+	mux.Add(src)
+
+	go func() {
+		src <- engine.Event{Service: "api", Type: engine.EventTypeLog, Message: "ready"}
+		close(src)
+	}()
+
+	mux.Close()
+	for range mux.Output() {
+	}
+
+	stackDir := filepath.Join(dir, "prod_stack")
+	serviceDir := filepath.Join(stackDir, "api")
+	entries, err := os.ReadDir(serviceDir)
+	if err != nil {
+		t.Fatalf("expected stack/service directory hierarchy: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected single log file, got %d", len(entries))
+	}
+}
+
 func TestMuxRotatesAndPrunesLogs(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Unix(0, 0)}
