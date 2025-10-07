@@ -69,10 +69,10 @@ func (m *Mux) Add(source <-chan engine.Event) {
 	go func() {
 		defer m.inputs.Done()
 		for evt := range source {
-			if evt.Type != engine.EventTypeLog {
-				continue
+			if evt.Type == engine.EventTypeLog {
+				evt = normalize(evt)
 			}
-			m.deliver(normalize(evt))
+			m.deliver(evt)
 		}
 	}()
 }
@@ -90,18 +90,14 @@ func (m *Mux) Close() {
 
 func (m *Mux) deliver(evt engine.Event) {
 	if !m.flushPending(evt.Service) {
-		if evt.Type == engine.EventTypeLog {
-			m.write(evt)
-		}
+		m.write(evt)
 		m.recordDrop(evt.Service, evt.Attempt)
 		return
 	}
 	if m.trySend(evt) {
 		return
 	}
-	if evt.Type == engine.EventTypeLog {
-		m.write(evt)
-	}
+	m.write(evt)
 	m.recordDrop(evt.Service, evt.Attempt)
 }
 
@@ -176,9 +172,7 @@ func (m *Mux) collectDrops() map[string]dropRecord {
 func (m *Mux) trySend(evt engine.Event) bool {
 	select {
 	case m.out <- evt:
-		if evt.Type == engine.EventTypeLog {
-			m.write(evt)
-		}
+		m.write(evt)
 		return true
 	default:
 		return false
@@ -187,9 +181,7 @@ func (m *Mux) trySend(evt engine.Event) bool {
 
 func (m *Mux) blockingSend(evt engine.Event) {
 	m.out <- evt
-	if evt.Type == engine.EventTypeLog {
-		m.write(evt)
-	}
+	m.write(evt)
 }
 
 func (m *Mux) write(evt engine.Event) {
@@ -246,6 +238,16 @@ func WithDirectory(dir string) SinkOption {
 	}
 }
 
+// WithStackName configures the sink to group logs beneath a sanitized stack
+// directory.
+func WithStackName(name string) SinkOption {
+	return func(cfg *sinkConfig) {
+		if name != "" {
+			cfg.stack = sanitizeName(name, "stack")
+		}
+	}
+}
+
 // WithMaxFileSize sets the maximum size of an individual log file before the
 // sink performs a rotation. Sizes of zero or less disable size-based rotation.
 func WithMaxFileSize(size int64) SinkOption {
@@ -292,6 +294,7 @@ type sinkConfig struct {
 	maxTotalSize int64
 	maxFileAge   time.Duration
 	maxFileCount int
+	stack        string
 	now          func() time.Time
 }
 
@@ -381,7 +384,7 @@ func (s *serviceSink) rotate() error {
 	if s.file != nil {
 		_ = s.file.Close()
 	}
-	dir := filepath.Join(s.sink.cfg.directory, s.service)
+	dir := s.serviceDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -426,7 +429,7 @@ func (s *serviceSink) prune() {
 	if cfg.maxFileAge <= 0 && cfg.maxTotalSize <= 0 && cfg.maxFileCount <= 0 {
 		return
 	}
-	dir := filepath.Join(cfg.directory, s.service)
+	dir := s.serviceDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -508,10 +511,23 @@ func (s *serviceSink) close() {
 	}
 }
 
+func (s *serviceSink) serviceDir() string {
+	parts := []string{s.sink.cfg.directory}
+	if s.sink.cfg.stack != "" {
+		parts = append(parts, s.sink.cfg.stack)
+	}
+	parts = append(parts, s.service)
+	return filepath.Join(parts...)
+}
+
 func sanitizeComponent(value string) string {
+	return sanitizeName(value, "service")
+}
+
+func sanitizeName(value, fallback string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "service"
+		return fallback
 	}
 	value = strings.Map(func(r rune) rune {
 		switch {
@@ -525,7 +541,7 @@ func sanitizeComponent(value string) string {
 	}, value)
 	value = strings.Trim(value, "._")
 	if value == "" {
-		return "service"
+		return fallback
 	}
 	return value
 }
