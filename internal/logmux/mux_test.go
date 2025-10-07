@@ -189,6 +189,46 @@ func TestMuxRotatesAndPrunesLogs(t *testing.T) {
 	}
 }
 
+func TestMuxPrunesByFileCount(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	mux := New(1,
+		WithDirectory(dir),
+		WithMaxFileSize(64),
+		WithMaxFileCount(2),
+		withClock(clock.Now),
+	)
+
+	src := make(chan engine.Event, 6)
+	mux.Add(src)
+
+	go func() {
+		for i := 0; i < 5; i++ {
+			src <- engine.Event{Service: "api", Type: engine.EventTypeLog, Message: strings.Repeat("x", 64)}
+			clock.Advance(250 * time.Millisecond)
+		}
+		close(src)
+	}()
+
+	go mux.Close()
+	for range mux.Output() {
+	}
+
+	serviceDir := filepath.Join(dir, "api")
+	entries, err := os.ReadDir(serviceDir)
+	if err != nil {
+		t.Fatalf("expected log directory: %v", err)
+	}
+
+	if len(entries) != 2 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("expected two retained files, got %d: %v", len(entries), names)
+	}
+}
+
 func TestMuxPersistsDropMetadata(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Unix(0, 0)}

@@ -165,6 +165,18 @@ Failed services restart using exponential backoff with jitter, bounded by config
 
 All runtime outputs are normalized into structured NDJSON with fields such as timestamp, service, replica, level, message, source, and arbitrary metadata. The logging layer supports fan-in for commands like `orco logs`, drives the TUI log pane, and can optionally persist to disk. Backpressure is controlled via bounded channels that emit "dropped" meta-events when overwhelmed.
 
+### Log retention configuration
+
+Persistent CLI flags configure how the on-disk log sink rotates and prunes files:
+
+- `--log-dir` controls where service logs are stored. When unset, persistence is disabled.
+- `--log-max-file-size` caps the size of an individual log file before the sink rotates to a new file.
+- `--log-max-total-size` bounds the aggregate bytes retained for each service, pruning the oldest files first.
+- `--log-max-file-age` rotates and prunes files older than the supplied duration.
+- `--log-max-files` retains at most the specified number of log files per service.
+
+Each option can also be provided via the `ORCO_LOG_DIR`, `ORCO_LOG_MAX_FILE_SIZE`, `ORCO_LOG_MAX_TOTAL_SIZE`, `ORCO_LOG_MAX_FILE_AGE`, and `ORCO_LOG_MAX_FILE_COUNT` environment variables, respectively.
+
 ## TUI
 
 The terminal UI presents a live status table and tailing logs:

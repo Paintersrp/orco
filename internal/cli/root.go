@@ -22,7 +22,13 @@ import (
 )
 
 func NewRootCmd() *cobra.Command {
+	root, _ := newRootCommand()
+	return root
+}
+
+func newRootCommand() (*cobra.Command, *context) {
 	var stackFile string
+	logRetention := logRetentionFromEnv()
 
 	root := &cobra.Command{
 		Use:   "orco",
@@ -35,7 +41,13 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().
 		StringVarP(&stackFile, "file", "f", "stack.yaml", "Path to stack definition")
 
-	ctx := &context{stackFile: &stackFile}
+	root.PersistentFlags().StringVar(&logRetention.Directory, "log-dir", logRetention.Directory, "Directory to persist service logs")
+	root.PersistentFlags().Int64Var(&logRetention.MaxFileSize, "log-max-file-size", logRetention.MaxFileSize, "Maximum size of individual log files before rotation")
+	root.PersistentFlags().Int64Var(&logRetention.MaxTotalSize, "log-max-total-size", logRetention.MaxTotalSize, "Maximum total size of retained log files per service")
+	root.PersistentFlags().DurationVar(&logRetention.MaxFileAge, "log-max-file-age", logRetention.MaxFileAge, "Maximum age of a log file before rotation")
+	root.PersistentFlags().IntVar(&logRetention.MaxFileCount, "log-max-files", logRetention.MaxFileCount, "Maximum number of log files to retain per service")
+
+	ctx := &context{stackFile: &stackFile, logRetention: &logRetention}
 	root.AddCommand(newUpCmd(ctx))
 	root.AddCommand(newDownCmd(ctx))
 	root.AddCommand(newStatusCmd(ctx))
@@ -50,7 +62,7 @@ func NewRootCmd() *cobra.Command {
 	root.SilenceUsage = true
 	root.SilenceErrors = true
 
-	return root
+	return root, ctx
 }
 
 // Execute runs the CLI entrypoint.
@@ -70,6 +82,7 @@ func Execute() {
 type context struct {
 	stackFile    *string
 	orchestrator *engine.Orchestrator
+	logRetention *logRetentionConfig
 
 	mu                  sync.RWMutex
 	deployment          *engine.Deployment
@@ -77,6 +90,14 @@ type context struct {
 	deploymentStackSpec map[string]*stack.Service
 	tracker             *statusTracker
 	logStream           *eventStream
+}
+
+type logRetentionConfig struct {
+	Directory    string
+	MaxFileSize  int64
+	MaxTotalSize int64
+	MaxFileAge   time.Duration
+	MaxFileCount int
 }
 
 func (c *context) loadStack() (*cliutil.StackDocument, error) {
@@ -168,7 +189,7 @@ func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan en
 	c.mu.Unlock()
 
 	out := make(chan engine.Event, buffer)
-	logOpts := buildLogSinkOptions()
+	logOpts := c.logSinkOptions()
 	logMux := logmux.New(buffer, logOpts...)
 	logInput := make(chan engine.Event, buffer)
 	logMux.Add(logInput)
@@ -244,26 +265,23 @@ func (c *context) subscribeLogStream(buffer int) (<-chan engine.Event, func(), b
 	return stream.Subscribe(buffer)
 }
 
-func buildLogSinkOptions() []logmux.SinkOption {
-	dir := os.Getenv("ORCO_LOG_DIR")
-	if dir == "" {
+func (c *context) logSinkOptions() []logmux.SinkOption {
+	cfg := c.logRetention
+	if cfg == nil || cfg.Directory == "" {
 		return nil
 	}
-	opts := []logmux.SinkOption{logmux.WithDirectory(dir)}
-	if value := os.Getenv("ORCO_LOG_MAX_FILE_SIZE"); value != "" {
-		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
-			opts = append(opts, logmux.WithMaxFileSize(size))
-		}
+	opts := []logmux.SinkOption{logmux.WithDirectory(cfg.Directory)}
+	if cfg.MaxFileSize > 0 {
+		opts = append(opts, logmux.WithMaxFileSize(cfg.MaxFileSize))
 	}
-	if value := os.Getenv("ORCO_LOG_MAX_TOTAL_SIZE"); value != "" {
-		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
-			opts = append(opts, logmux.WithMaxTotalSize(size))
-		}
+	if cfg.MaxTotalSize > 0 {
+		opts = append(opts, logmux.WithMaxTotalSize(cfg.MaxTotalSize))
 	}
-	if value := os.Getenv("ORCO_LOG_MAX_FILE_AGE"); value != "" {
-		if age, err := time.ParseDuration(value); err == nil && age > 0 {
-			opts = append(opts, logmux.WithMaxFileAge(age))
-		}
+	if cfg.MaxFileAge > 0 {
+		opts = append(opts, logmux.WithMaxFileAge(cfg.MaxFileAge))
+	}
+	if cfg.MaxFileCount > 0 {
+		opts = append(opts, logmux.WithMaxFileCount(cfg.MaxFileCount))
 	}
 	return opts
 }
@@ -365,4 +383,30 @@ func (s *eventStream) Close() {
 	s.subs = nil
 	s.backlog = nil
 	s.mu.Unlock()
+}
+
+func logRetentionFromEnv() logRetentionConfig {
+	cfg := logRetentionConfig{}
+	cfg.Directory = os.Getenv("ORCO_LOG_DIR")
+	if value := os.Getenv("ORCO_LOG_MAX_FILE_SIZE"); value != "" {
+		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
+			cfg.MaxFileSize = size
+		}
+	}
+	if value := os.Getenv("ORCO_LOG_MAX_TOTAL_SIZE"); value != "" {
+		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
+			cfg.MaxTotalSize = size
+		}
+	}
+	if value := os.Getenv("ORCO_LOG_MAX_FILE_AGE"); value != "" {
+		if age, err := time.ParseDuration(value); err == nil && age > 0 {
+			cfg.MaxFileAge = age
+		}
+	}
+	if value := os.Getenv("ORCO_LOG_MAX_FILE_COUNT"); value != "" {
+		if count, err := strconv.Atoi(value); err == nil && count > 0 {
+			cfg.MaxFileCount = count
+		}
+	}
+	return cfg
 }
