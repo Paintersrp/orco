@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Paintersrp/orco/internal/cliutil"
 	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/logmux"
 	"github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/runtime/docker"
 	"github.com/Paintersrp/orco/internal/runtime/process"
@@ -166,19 +168,58 @@ func (c *context) trackEvents(events <-chan engine.Event, buffer int) (<-chan en
 	c.mu.Unlock()
 
 	out := make(chan engine.Event, buffer)
+	logOpts := buildLogSinkOptions()
+	logMux := logmux.New(buffer, logOpts...)
+	logInput := make(chan engine.Event, buffer)
+	logMux.Add(logInput)
+	logOutput := logMux.Output()
+	var logClosed bool
+
 	go func() {
 		defer close(out)
 		defer stream.Close()
-		for evt := range events {
-			tracker.Apply(evt)
-			out <- evt
-			stream.Publish(evt)
+		defer func() {
+			c.mu.Lock()
+			if c.logStream == stream {
+				c.logStream = nil
+			}
+			c.mu.Unlock()
+		}()
+
+		eventsCh := events
+		for eventsCh != nil || logOutput != nil {
+			select {
+			case evt, ok := <-eventsCh:
+				if !ok {
+					eventsCh = nil
+					if !logClosed {
+						close(logInput)
+						logMux.Close()
+						logClosed = true
+					}
+					continue
+				}
+				if evt.Type == engine.EventTypeLog {
+					logInput <- evt
+					continue
+				}
+				tracker.Apply(evt)
+				out <- evt
+				stream.Publish(evt)
+			case evt, ok := <-logOutput:
+				if !ok {
+					logOutput = nil
+					continue
+				}
+				tracker.Apply(evt)
+				out <- evt
+				stream.Publish(evt)
+			}
 		}
-		c.mu.Lock()
-		if c.logStream == stream {
-			c.logStream = nil
+		if !logClosed {
+			close(logInput)
+			logMux.Close()
 		}
-		c.mu.Unlock()
 	}()
 
 	release := func() {
@@ -201,6 +242,30 @@ func (c *context) subscribeLogStream(buffer int) (<-chan engine.Event, func(), b
 		return nil, nil, false
 	}
 	return stream.Subscribe(buffer)
+}
+
+func buildLogSinkOptions() []logmux.SinkOption {
+	dir := os.Getenv("ORCO_LOG_DIR")
+	if dir == "" {
+		return nil
+	}
+	opts := []logmux.SinkOption{logmux.WithDirectory(dir)}
+	if value := os.Getenv("ORCO_LOG_MAX_FILE_SIZE"); value != "" {
+		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
+			opts = append(opts, logmux.WithMaxFileSize(size))
+		}
+	}
+	if value := os.Getenv("ORCO_LOG_MAX_TOTAL_SIZE"); value != "" {
+		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
+			opts = append(opts, logmux.WithMaxTotalSize(size))
+		}
+	}
+	if value := os.Getenv("ORCO_LOG_MAX_FILE_AGE"); value != "" {
+		if age, err := time.ParseDuration(value); err == nil && age > 0 {
+			opts = append(opts, logmux.WithMaxFileAge(age))
+		}
+	}
+	return opts
 }
 
 type eventStream struct {
