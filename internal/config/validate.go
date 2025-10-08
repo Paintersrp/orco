@@ -17,7 +17,7 @@ func validatePortCollisions(s *Stack) error {
 	if len(s.Services) == 0 {
 		return nil
 	}
-	claimed := map[int]map[string]*portClaim{}
+	claimed := map[int]map[string]map[string]*portClaim{}
 	for serviceName, svc := range s.Services {
 		if svc == nil {
 			continue
@@ -29,7 +29,7 @@ func validatePortCollisions(s *Stack) error {
 	return nil
 }
 
-func claimServicePorts(serviceName string, svc *ServiceSpec, claimed map[int]map[string]*portClaim) error {
+func claimServicePorts(serviceName string, svc *ServiceSpec, claimed map[int]map[string]map[string]*portClaim) error {
 	for idx, spec := range svc.Ports {
 		mappings, err := nat.ParsePortSpec(spec)
 		if err != nil {
@@ -47,10 +47,11 @@ func claimServicePorts(serviceName string, svc *ServiceSpec, claimed map[int]map
 			}
 			startPort := int(start)
 			endPort := int(end)
+			protocol := mapping.Port.Proto()
 			for port := startPort; port <= endPort; port++ {
 				hostClaims := claimed[port]
 
-				conflictServices := collectConflictingServices(hostIP, hostClaims)
+				conflictServices := collectConflictingServices(hostIP, protocol, hostClaims)
 				if len(conflictServices) > 0 {
 					services := make([]string, 0, len(conflictServices)+1)
 					for existing := range conflictServices {
@@ -60,7 +61,7 @@ func claimServicePorts(serviceName string, svc *ServiceSpec, claimed map[int]map
 						services = append(services, serviceName)
 					}
 					sort.Strings(services)
-					next := nextAvailablePort(hostIP, port, claimed)
+					next := nextAvailablePort(hostIP, protocol, port, claimed)
 					if next == 0 {
 						return fmt.Errorf("%s: host port %d on IP %q conflicts with service(s) %s; no additional host ports available", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), port, hostIP, strings.Join(services, ", "))
 					}
@@ -68,13 +69,18 @@ func claimServicePorts(serviceName string, svc *ServiceSpec, claimed map[int]map
 				}
 
 				if hostClaims == nil {
-					hostClaims = map[string]*portClaim{}
+					hostClaims = map[string]map[string]*portClaim{}
 					claimed[port] = hostClaims
 				}
-				claim := hostClaims[hostIP]
+				claimsByProtocol := hostClaims[hostIP]
+				if claimsByProtocol == nil {
+					claimsByProtocol = map[string]*portClaim{}
+					hostClaims[hostIP] = claimsByProtocol
+				}
+				claim := claimsByProtocol[protocol]
 				if claim == nil {
 					claim = &portClaim{services: map[string]struct{}{}}
-					hostClaims[hostIP] = claim
+					claimsByProtocol[protocol] = claim
 				}
 				claim.services[serviceName] = struct{}{}
 			}
@@ -83,29 +89,34 @@ func claimServicePorts(serviceName string, svc *ServiceSpec, claimed map[int]map
 	return nil
 }
 
-func collectConflictingServices(hostIP string, hostClaims map[string]*portClaim) map[string]struct{} {
+func collectConflictingServices(hostIP, protocol string, hostClaims map[string]map[string]*portClaim) map[string]struct{} {
 	if len(hostClaims) == 0 {
 		return nil
 	}
 
 	conflictServices := map[string]struct{}{}
 
-	if hostIP == "0.0.0.0" {
-		for _, claim := range hostClaims {
+	addConflicts := func(claims map[string]*portClaim) {
+		if claims == nil {
+			return
+		}
+		if claim := claims[protocol]; claim != nil {
 			for existing := range claim.services {
 				conflictServices[existing] = struct{}{}
 			}
+		}
+	}
+
+	if hostIP == "0.0.0.0" {
+		for _, claims := range hostClaims {
+			addConflicts(claims)
 		}
 	} else {
-		if claim := hostClaims[hostIP]; claim != nil {
-			for existing := range claim.services {
-				conflictServices[existing] = struct{}{}
-			}
+		if claims := hostClaims[hostIP]; claims != nil {
+			addConflicts(claims)
 		}
-		if claim := hostClaims["0.0.0.0"]; claim != nil {
-			for existing := range claim.services {
-				conflictServices[existing] = struct{}{}
-			}
+		if claims := hostClaims["0.0.0.0"]; claims != nil {
+			addConflicts(claims)
 		}
 	}
 
@@ -115,7 +126,7 @@ func collectConflictingServices(hostIP string, hostClaims map[string]*portClaim)
 	return conflictServices
 }
 
-func nextAvailablePort(hostIP string, start int, claimed map[int]map[string]*portClaim) int {
+func nextAvailablePort(hostIP, protocol string, start int, claimed map[int]map[string]map[string]*portClaim) int {
 	for candidate := start + 1; candidate <= 65535; candidate++ {
 		hostClaims := claimed[candidate]
 		if hostIP == "0.0.0.0" {
@@ -124,8 +135,8 @@ func nextAvailablePort(hostIP string, start int, claimed map[int]map[string]*por
 			}
 
 			available := true
-			for _, claim := range hostClaims {
-				if claim != nil && len(claim.services) > 0 {
+			for _, claimsByProtocol := range hostClaims {
+				if claim := claimsByProtocol[protocol]; claim != nil && len(claim.services) > 0 {
 					available = false
 					break
 				}
@@ -142,7 +153,9 @@ func nextAvailablePort(hostIP string, start int, claimed map[int]map[string]*por
 
 		specific := hostClaims[hostIP]
 		wildcard := hostClaims["0.0.0.0"]
-		if (specific == nil || len(specific.services) == 0) && (wildcard == nil || len(wildcard.services) == 0) {
+		specificFree := specific == nil || specific[protocol] == nil || len(specific[protocol].services) == 0
+		wildcardFree := wildcard == nil || wildcard[protocol] == nil || len(wildcard[protocol].services) == 0
+		if specificFree && wildcardFree {
 			return candidate
 		}
 	}

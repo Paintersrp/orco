@@ -22,9 +22,10 @@ func testServiceSpec(ports ...string) *ServiceSpec {
 
 func TestValidatePortCollisions(t *testing.T) {
 	cases := []struct {
-		name     string
-		services map[string]*ServiceSpec
-		contains []string
+		name          string
+		services      map[string]*ServiceSpec
+		contains      []string
+		containsOneOf []string
 	}{
 		{
 			name: "conflict on wildcard interface",
@@ -47,9 +48,12 @@ func TestValidatePortCollisions(t *testing.T) {
 			},
 			contains: []string{
 				"host port 8080",
-				"IP \"127.0.0.1\"",
 				"service(s) api, web",
 				"next available port is 8081",
+			},
+			containsOneOf: []string{
+				"IP \"127.0.0.1\"",
+				"IP \"0.0.0.0\"",
 			},
 		},
 		{
@@ -83,6 +87,18 @@ func TestValidatePortCollisions(t *testing.T) {
 					t.Fatalf("expected error to contain %q, got %v", want, err)
 				}
 			}
+			if len(tc.containsOneOf) > 0 {
+				found := false
+				for _, want := range tc.containsOneOf {
+					if strings.Contains(err.Error(), want) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("expected error to contain one of %v, got %v", tc.containsOneOf, err)
+				}
+			}
 		})
 	}
 }
@@ -92,7 +108,7 @@ func TestWildcardPortConflictsRegardlessOfOrder(t *testing.T) {
 	specific := testServiceSpec("127.0.0.1:8080:80", "127.0.0.1:8081:81")
 
 	t.Run("specific before wildcard", func(t *testing.T) {
-		claimed := map[int]map[string]*portClaim{}
+		claimed := map[int]map[string]map[string]*portClaim{}
 		if err := claimServicePorts("specific", specific, claimed); err != nil {
 			t.Fatalf("claim specific service: %v", err)
 		}
@@ -110,7 +126,7 @@ func TestWildcardPortConflictsRegardlessOfOrder(t *testing.T) {
 	})
 
 	t.Run("wildcard before specific", func(t *testing.T) {
-		claimed := map[int]map[string]*portClaim{}
+		claimed := map[int]map[string]map[string]*portClaim{}
 		if err := claimServicePorts("wildcard", wildcard, claimed); err != nil {
 			t.Fatalf("claim wildcard service: %v", err)
 		}
@@ -126,6 +142,43 @@ func TestWildcardPortConflictsRegardlessOfOrder(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestPortClaimsAllowDifferentProtocols(t *testing.T) {
+	stack := &Stack{
+		Version: "0.1",
+		Stack:   StackMeta{Name: "demo"},
+		Services: map[string]*ServiceSpec{
+			"tcp": testServiceSpec("8080:80/tcp"),
+			"udp": testServiceSpec("8080:80/udp"),
+		},
+	}
+
+	if err := stack.Validate(); err != nil {
+		t.Fatalf("expected no validation error, got %v", err)
+	}
+}
+
+func TestNextAvailablePortConsidersProtocols(t *testing.T) {
+	claimed := map[int]map[string]map[string]*portClaim{
+		8080: {
+			"0.0.0.0": {
+				"tcp": &portClaim{services: map[string]struct{}{"api": {}}},
+			},
+		},
+	}
+
+	if got := nextAvailablePort("0.0.0.0", "udp", 8079, claimed); got != 8080 {
+		t.Fatalf("expected wildcard UDP to use 8080, got %d", got)
+	}
+
+	if got := nextAvailablePort("127.0.0.1", "udp", 8079, claimed); got != 8080 {
+		t.Fatalf("expected specific UDP to use 8080, got %d", got)
+	}
+
+	if got := nextAvailablePort("0.0.0.0", "tcp", 8079, claimed); got != 8081 {
+		t.Fatalf("expected wildcard TCP to skip to 8081, got %d", got)
+	}
 }
 
 func TestLoadWarnsOnSharedWritableVolumes(t *testing.T) {
