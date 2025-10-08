@@ -88,6 +88,8 @@ func loadIncludeDocument(path string, root bool) (map[string]any, []string, erro
 	}
 	delete(raw, "includes")
 
+	expandYAMLValues(raw)
+
 	return raw, includes, nil
 }
 
@@ -102,7 +104,11 @@ func extractIncludes(path string, raw map[string]any) ([]string, error) {
 		if len(v) == 0 {
 			return nil, nil
 		}
-		return append([]string(nil), v...), nil
+		expanded := make([]string, len(v))
+		for i, include := range v {
+			expanded[i] = expandEnvWithDefault(include)
+		}
+		return expanded, nil
 	case []any:
 		includes := make([]string, len(v))
 		for i, entry := range v {
@@ -110,7 +116,7 @@ func extractIncludes(path string, raw map[string]any) ([]string, error) {
 			if !ok {
 				return nil, fmt.Errorf("%s: includes[%d] must be a string", path, i)
 			}
-			includes[i] = s
+			includes[i] = expandEnvWithDefault(s)
 		}
 		if len(includes) == 0 {
 			return nil, nil
@@ -218,6 +224,36 @@ func cloneMap(src map[string]any) map[string]any {
 		cloned[key] = cloneValue(src[key])
 	}
 	return cloned
+}
+
+func expandYAMLValues(doc map[string]any) {
+	for key, value := range doc {
+		doc[key] = expandValueRecursive(value)
+	}
+}
+
+func expandValueRecursive(value any) any {
+	if m, ok := toStringMap(value); ok {
+		expandYAMLValues(m)
+		return m
+	}
+	switch typed := value.(type) {
+	case []any:
+		for i, elem := range typed {
+			typed[i] = expandValueRecursive(elem)
+		}
+		return typed
+	case []string:
+		expanded := make([]string, len(typed))
+		for i, elem := range typed {
+			expanded[i] = expandEnvWithDefault(elem)
+		}
+		return expanded
+	case string:
+		return expandEnvWithDefault(typed)
+	default:
+		return value
+	}
 }
 
 func containsPath(paths []string, target string) bool {
