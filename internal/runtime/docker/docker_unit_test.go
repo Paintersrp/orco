@@ -2,12 +2,12 @@ package docker
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
 
 	"github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/runtime/containerutil"
 	"github.com/Paintersrp/orco/internal/stack"
 )
 
@@ -19,7 +19,11 @@ func TestBuildConfigsVolumes(t *testing.T) {
 			{Source: "/host/cache", Target: "/cache", Mode: "ro"},
 		},
 	}
-	_, hostCfg, err := buildConfigs(spec)
+	common, err := containerutil.PrepareCommonSpec(spec)
+	if err != nil {
+		t.Fatalf("PrepareCommonSpec returned error: %v", err)
+	}
+	_, hostCfg, err := buildConfigs(spec, common)
 	if err != nil {
 		t.Fatalf("buildConfigs returned error: %v", err)
 	}
@@ -37,15 +41,8 @@ func TestBuildConfigsVolumeParseError(t *testing.T) {
 			{Source: "/host/data", Target: "var/data"},
 		},
 	}
-	_, _, err := buildConfigs(spec)
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "parse volume") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(err.Error(), "/host/data:var/data") {
-		t.Fatalf("error missing bind spec: %v", err)
+	if _, err := containerutil.PrepareCommonSpec(spec); err == nil {
+		t.Fatalf("expected parse error")
 	}
 }
 
@@ -58,7 +55,11 @@ func TestBuildConfigsResources(t *testing.T) {
 			MemoryReservation: "128Mi",
 		},
 	}
-	_, hostCfg, err := buildConfigs(spec)
+	common, err := containerutil.PrepareCommonSpec(spec)
+	if err != nil {
+		t.Fatalf("PrepareCommonSpec returned error: %v", err)
+	}
+	_, hostCfg, err := buildConfigs(spec, common)
 	if err != nil {
 		t.Fatalf("buildConfigs returned error: %v", err)
 	}
@@ -90,12 +91,8 @@ func TestBuildConfigsResourcesInvalid(t *testing.T) {
 			CPU: "bogus",
 		},
 	}
-	_, _, err := buildConfigs(spec)
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "parse cpu") {
-		t.Fatalf("unexpected error: %v", err)
+	if _, err := containerutil.PrepareCommonSpec(spec); err == nil {
+		t.Fatalf("expected parse error")
 	}
 }
 

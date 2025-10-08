@@ -7,7 +7,14 @@ Orco is a single-node orchestration engine that delivers most of the ergonomics 
 The repository now includes a Go implementation of the Orco CLI. To experiment with the parser and planning utilities:
 
 1. Build the binary: `go build ./cmd/orco`
-2. Run commands against the sample manifest in `examples/demo-stack.yaml`, for example:
+2. When working with the Podman runtime (building or testing), set Go build tags to avoid optional CGO dependencies if the corresponding native libraries (gpgme, btrfs, devmapper) are not installed:
+
+   ```bash
+   GOFLAGS="-tags=containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriver_devicemapper" go test ./...
+   ```
+
+   Installers with the required native libraries can omit this flag.
+3. Run commands against the sample manifest in `examples/demo-stack.yaml`, for example:
 
    ```bash
    ./orco --file examples/demo-stack.yaml status

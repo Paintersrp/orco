@@ -1,13 +1,10 @@
 package docker
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,12 +15,11 @@ import (
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
-	"github.com/docker/docker/volume/mounts"
 	"github.com/docker/go-connections/nat"
 
 	"github.com/Paintersrp/orco/internal/probe"
-	"github.com/Paintersrp/orco/internal/resources"
 	"github.com/Paintersrp/orco/internal/runtime"
+	"github.com/Paintersrp/orco/internal/runtime/containerutil"
 	"github.com/Paintersrp/orco/internal/stack"
 )
 
@@ -40,7 +36,6 @@ func New() runtime.Runtime {
 
 func init() {
 	runtime.Register("docker", New)
-	runtime.Register("podman", New)
 }
 
 func (r *runtimeImpl) getClient() (*client.Client, error) {
@@ -65,11 +60,16 @@ func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtim
 		return nil, errors.New("service image is required")
 	}
 
+	commonSpec, err := containerutil.PrepareCommonSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := ensureImage(ctx, cli, spec.Image); err != nil {
 		return nil, err
 	}
 
-	containerCfg, hostCfg, err := buildConfigs(spec)
+	containerCfg, hostCfg, err := buildConfigs(spec, commonSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -91,11 +91,7 @@ func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtim
 		health = spec.Service.Health.Clone()
 	}
 
-	memoryLimit := ""
-	if spec.Resources != nil {
-		memoryLimit = spec.Resources.Memory
-	}
-	inst := newDockerInstance(cli, containerID, spec.Name, health, memoryLimit)
+	inst := newDockerInstance(cli, containerID, spec.Name, health, commonSpec.MemoryLimit)
 
 	if inst.health == nil {
 		inst.signalReady(nil)
@@ -200,8 +196,8 @@ func (i *dockerInstance) startLogStreamer() {
 			}
 			defer reader.Close()
 
-			stdout := newLogWriter(i.logCtx, i.deliverLog, runtime.LogSourceStdout, "")
-			stderr := newLogWriter(i.logCtx, i.deliverLog, runtime.LogSourceStderr, "warn")
+			stdout := containerutil.NewLogWriter(i.logCtx, i.deliverLog, runtime.LogSourceStdout, "")
+			stderr := containerutil.NewLogWriter(i.logCtx, i.deliverLog, runtime.LogSourceStderr, "warn")
 			_, _ = stdcopy.StdCopy(stdout, stderr, reader)
 			stdout.Close()
 			stderr.Close()
@@ -492,110 +488,29 @@ func (i *dockerInstance) Logs(ctx context.Context) (<-chan runtime.LogEntry, err
 }
 
 func waitOutcomeError(outcome waitOutcome) error {
-	if outcome.err != nil {
-		return wrapOOMError(outcome.err, outcome)
+	status := containerutil.WaitStatus{
+		ExitCode:    outcome.status.StatusCode,
+		Err:         outcome.err,
+		OOMKilled:   outcome.oomKilled,
+		MemoryLimit: outcome.memoryLimit,
 	}
 	if outcome.status.Error != nil {
-		if outcome.status.StatusCode != 0 {
-			return wrapOOMError(fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message), outcome)
-		}
-		return wrapOOMError(errors.New(outcome.status.Error.Message), outcome)
+		status.ErrorMessage = outcome.status.Error.Message
 	}
-	if outcome.status.StatusCode != 0 {
-		return wrapOOMError(fmt.Errorf("container exited with status %d", outcome.status.StatusCode), outcome)
-	}
-	return wrapOOMError(errors.New("container exited before ready"), outcome)
+	return containerutil.WaitReadyError(status)
 }
 
 func waitOutcomeExitError(outcome waitOutcome) error {
-	if outcome.err != nil {
-		return wrapOOMError(outcome.err, outcome)
+	status := containerutil.WaitStatus{
+		ExitCode:    outcome.status.StatusCode,
+		Err:         outcome.err,
+		OOMKilled:   outcome.oomKilled,
+		MemoryLimit: outcome.memoryLimit,
 	}
 	if outcome.status.Error != nil {
-		if outcome.status.StatusCode != 0 {
-			return wrapOOMError(fmt.Errorf("container exited with status %d: %s", outcome.status.StatusCode, outcome.status.Error.Message), outcome)
-		}
-		return wrapOOMError(errors.New(outcome.status.Error.Message), outcome)
+		status.ErrorMessage = outcome.status.Error.Message
 	}
-	if outcome.status.StatusCode != 0 {
-		return wrapOOMError(fmt.Errorf("container exited with status %d", outcome.status.StatusCode), outcome)
-	}
-	return nil
-}
-
-func wrapOOMError(err error, outcome waitOutcome) error {
-	if err == nil {
-		return nil
-	}
-	if !outcome.oomKilled {
-		return err
-	}
-	limit := strings.TrimSpace(outcome.memoryLimit)
-	if limit != "" {
-		return fmt.Errorf("container terminated by the kernel OOM killer (memory limit %s): %w", limit, err)
-	}
-	return fmt.Errorf("container terminated by the kernel OOM killer: %w", err)
-}
-
-type logWriter struct {
-	ctx    context.Context
-	emitFn func(runtime.LogEntry)
-	source string
-	level  string
-	buf    bytes.Buffer
-	mu     sync.Mutex
-}
-
-func newLogWriter(ctx context.Context, emit func(runtime.LogEntry), source, level string) *logWriter {
-	return &logWriter{ctx: ctx, emitFn: emit, source: source, level: level}
-}
-
-func (w *logWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	total := len(p)
-	reader := bufio.NewReader(bytes.NewReader(p))
-	for {
-		segment, err := reader.ReadBytes('\n')
-		if len(segment) > 0 {
-			if segment[len(segment)-1] == '\n' {
-				w.buf.Write(segment[:len(segment)-1])
-				w.emit(w.buf.String())
-				w.buf.Reset()
-			} else {
-				w.buf.Write(segment)
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return total, err
-		}
-	}
-	return total, nil
-}
-
-func (w *logWriter) emit(line string) {
-	if line == "" {
-		return
-	}
-	select {
-	case <-w.ctx.Done():
-		return
-	default:
-	}
-	w.emitFn(runtime.LogEntry{Message: line, Source: w.source, Level: w.level})
-}
-
-func (w *logWriter) Close() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.buf.Len() == 0 {
-		return
-	}
-	w.emit(w.buf.String())
-	w.buf.Reset()
+	return containerutil.WaitExitError(status)
 }
 
 func ensureImage(ctx context.Context, cli *client.Client, imageName string) error {
@@ -615,94 +530,40 @@ func ensureImage(ctx context.Context, cli *client.Client, imageName string) erro
 	return nil
 }
 
-func buildConfigs(spec runtime.StartSpec) (*container.Config, *container.HostConfig, error) {
-	env := make([]string, 0, len(spec.Env))
-	for k, v := range spec.Env {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
-	sort.Strings(env)
-
+func buildConfigs(spec runtime.StartSpec, common containerutil.CommonSpec) (*container.Config, *container.HostConfig, error) {
 	exposed := nat.PortSet{}
 	bindings := nat.PortMap{}
-	for _, portSpec := range spec.Ports {
-		mappings, err := nat.ParsePortSpec(portSpec)
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse port %q: %w", portSpec, err)
-		}
-		for _, mapping := range mappings {
-			exposed[mapping.Port] = struct{}{}
-			bindings[mapping.Port] = append(bindings[mapping.Port], mapping.Binding)
-		}
-	}
-
-	cmd := spec.Command
-	var cmdSlice []string
-	if len(cmd) > 0 {
-		cmdSlice = append([]string(nil), cmd...)
+	for _, mapping := range common.Ports {
+		exposed[mapping.Port] = struct{}{}
+		copied := append([]nat.PortBinding(nil), mapping.Bindings...)
+		bindings[mapping.Port] = append(bindings[mapping.Port], copied...)
 	}
 
 	config := &container.Config{
 		Image:        spec.Image,
-		Env:          env,
-		Cmd:          strslice.StrSlice(cmdSlice),
+		Env:          append([]string(nil), common.Env...),
+		Cmd:          strslice.StrSlice(append([]string(nil), common.Cmd...)),
 		ExposedPorts: exposed,
 	}
-	if spec.Workdir != "" {
-		config.WorkingDir = spec.Workdir
+	if common.Workdir != "" {
+		config.WorkingDir = common.Workdir
 	}
+
 	host := &container.HostConfig{PortBindings: bindings}
-	if len(spec.Volumes) > 0 {
-		parser := mounts.NewParser()
-		host.Binds = make([]string, 0, len(spec.Volumes))
-		for _, volume := range spec.Volumes {
-			bindSpec := volume.Source + ":" + volume.Target
-			if volume.Mode != "" {
-				bindSpec += ":" + volume.Mode
-			}
-			if _, err := parser.ParseMountRaw(bindSpec, ""); err != nil {
-				return nil, nil, fmt.Errorf("parse volume %q: %w", bindSpec, err)
-			}
-			host.Binds = append(host.Binds, bindSpec)
+	if len(common.Binds) > 0 {
+		host.Binds = append([]string(nil), common.Binds...)
+	}
+
+	if common.Resources != (containerutil.Resources{}) {
+		host.Resources = container.Resources{
+			NanoCPUs:          common.Resources.NanoCPUs,
+			CPUPeriod:         common.Resources.CPUPeriod,
+			CPUQuota:          common.Resources.CPUQuota,
+			Memory:            common.Resources.Memory,
+			MemorySwap:        common.Resources.MemorySwap,
+			MemoryReservation: common.Resources.MemoryReservation,
 		}
 	}
-	if spec.Resources != nil {
-		var limits container.Resources
-		if strings.TrimSpace(spec.Resources.CPU) != "" {
-			nano, err := resources.ParseCPU(spec.Resources.CPU)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parse cpu: %w", err)
-			}
-			if nano > 0 {
-				const cpuPeriod = 100000
-				limits.NanoCPUs = nano
-				limits.CPUPeriod = cpuPeriod
-				quota := (nano*cpuPeriod + resources.NanoCPUs/2) / resources.NanoCPUs
-				if quota < 1 {
-					quota = 1
-				}
-				limits.CPUQuota = quota
-			}
-		}
-		if strings.TrimSpace(spec.Resources.Memory) != "" {
-			bytes, err := resources.ParseMemory(spec.Resources.Memory)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parse memory: %w", err)
-			}
-			limits.Memory = bytes
-			// With cgroups v2 Docker requires the swap limit to be set
-			// alongside the memory limit to enforce hard caps. Matching
-			// the values disables swap usage and mirrors the behavior
-			// expected by resource hints.
-			limits.MemorySwap = bytes
-		}
-		if strings.TrimSpace(spec.Resources.MemoryReservation) != "" {
-			bytes, err := resources.ParseMemory(spec.Resources.MemoryReservation)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parse memory reservation: %w", err)
-			}
-			limits.MemoryReservation = bytes
-		}
-		host.Resources = limits
-	}
+
 	return config, host, nil
 }
