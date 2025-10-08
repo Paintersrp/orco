@@ -4,6 +4,13 @@ stack:
   name: demo
   workdir: ./
 
+logging:
+  directory: ./logs
+  maxFileSize: 131072
+  maxTotalSize: 524288
+  maxFileAge: 1h
+  maxFileCount: 8
+
 defaults:
   restartPolicy:
     maxRetries: 5

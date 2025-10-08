@@ -177,6 +177,19 @@ Persistent CLI flags configure how the on-disk log sink rotates and prunes files
 
 Each option can also be provided via the `ORCO_LOG_DIR`, `ORCO_LOG_MAX_FILE_SIZE`, `ORCO_LOG_MAX_TOTAL_SIZE`, `ORCO_LOG_MAX_FILE_AGE`, and `ORCO_LOG_MAX_FILE_COUNT` environment variables, respectively.
 
+Stack manifests may declare default retention under a top-level `logging` key. These defaults apply to all commands unless overridden via flags or environment variables:
+
+```
+logging:
+  directory: ./logs
+  maxFileSize: 128000
+  maxTotalSize: 512000
+  maxFileAge: 1h
+  maxFileCount: 10
+```
+
+Relative paths are resolved against the stack's working directory.
+
 ## TUI
 
 The terminal UI presents a live status table and tailing logs:

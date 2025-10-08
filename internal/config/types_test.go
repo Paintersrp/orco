@@ -193,3 +193,68 @@ func TestProbeApplyDefaultsCopiesLogAndExpression(t *testing.T) {
 		t.Fatalf("unexpected sources: %#v", probe.Log.Sources)
 	}
 }
+
+func TestStackValidateLoggingConstraints(t *testing.T) {
+	mkStack := func() *Stack {
+		return &Stack{
+			Version: "0.1",
+			Stack:   StackMeta{Name: "demo"},
+			Services: map[string]*ServiceSpec{
+				"api": {
+					Runtime:  "process",
+					Command:  []string{"/bin/true"},
+					Replicas: 1,
+					Health: &ProbeSpec{
+						HTTP: &HTTPProbeSpec{URL: "http://localhost:8080/healthz", ExpectStatus: []int{200}},
+					},
+				},
+			},
+		}
+	}
+
+	cases := []struct {
+		name    string
+		logging *LoggingSpec
+		want    string
+	}{
+		{
+			name:    "negative file size",
+			logging: &LoggingSpec{MaxFileSize: int64Ptr(-1)},
+			want:    "logging.maxFileSize",
+		},
+		{
+			name:    "negative total size",
+			logging: &LoggingSpec{MaxTotalSize: int64Ptr(-1)},
+			want:    "logging.maxTotalSize",
+		},
+		{
+			name:    "negative file count",
+			logging: &LoggingSpec{MaxFileCount: intPtr(-1)},
+			want:    "logging.maxFileCount",
+		},
+		{
+			name:    "negative file age",
+			logging: &LoggingSpec{MaxFileAge: Duration{Duration: -time.Second, explicit: true}},
+			want:    "logging.maxFileAge",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stack := mkStack()
+			stack.Logging = tc.logging
+			err := stack.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
+func intPtr(v int) *int {
+	return &v
+}

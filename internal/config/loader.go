@@ -36,6 +36,13 @@ func Load(path string) (*Stack, error) {
 	resolvedWorkdir := resolveWorkdir(stackDir, os.ExpandEnv(doc.Stack.Workdir))
 	doc.Stack.Workdir = resolvedWorkdir
 
+	if doc.Logging != nil {
+		doc.Logging.Directory = os.ExpandEnv(doc.Logging.Directory)
+		if doc.Logging.Directory != "" && !filepath.IsAbs(doc.Logging.Directory) {
+			doc.Logging.Directory = filepath.Clean(filepath.Join(resolvedWorkdir, doc.Logging.Directory))
+		}
+	}
+
 	for name, svc := range doc.Services {
 		if svc == nil {
 			continue
