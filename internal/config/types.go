@@ -415,6 +415,9 @@ func (s *Stack) Validate() error {
 			}
 		}
 	}
+	if err := validatePortCollisions(s); err != nil {
+		return err
+	}
 	return nil
 }
 
