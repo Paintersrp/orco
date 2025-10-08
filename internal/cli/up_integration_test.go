@@ -4,6 +4,10 @@ import (
 	"bytes"
 	stdcontext "context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Paintersrp/orco/internal/config"
 	"github.com/Paintersrp/orco/internal/engine"
 	"github.com/Paintersrp/orco/internal/probe"
 	"github.com/Paintersrp/orco/internal/runtime"
+	proxyruntime "github.com/Paintersrp/orco/internal/runtime/proxy"
 )
 
 func TestUpCommandStartsServicesInDependencyOrder(t *testing.T) {
@@ -246,6 +252,156 @@ services:
 		!bytes.Contains(stderr.Bytes(), []byte("service api failed readiness")) {
 		t.Fatalf("expected readiness error in stderr, got: %s", stderr.String())
 	}
+}
+
+func TestUpCommandRoutesTrafficThroughProxy(t *testing.T) {
+	stablePort := allocatePort(t)
+	canaryPort := allocatePort(t)
+	proxyPort := allocatePort(t)
+
+	stackPath := writeStackFile(t, fmt.Sprintf(`version: "0.1"
+stack:
+  name: "proxy-demo"
+  workdir: "."
+proxy:
+  routes:
+    - headers:
+        X-Canary: "1"
+      pathPrefix: /api/
+      service: canary
+      port: %d
+      stripPathPrefix: true
+    - pathPrefix: /api/
+      service: stable
+      port: %d
+      stripPathPrefix: true
+services:
+  stable:
+    runtime: process
+    command: ["ignored"]
+    env:
+      LISTEN_ADDR: 127.0.0.1:%d
+      RESPONSE: stable
+    health:
+      cmd:
+        command: ["true"]
+  canary:
+    runtime: process
+    command: ["ignored"]
+    env:
+      LISTEN_ADDR: 127.0.0.1:%d
+      RESPONSE: canary
+    update:
+      strategy: canary
+    health:
+      cmd:
+        command: ["true"]
+`, canaryPort, stablePort, stablePort, canaryPort))
+
+	t.Setenv("ORCO_PROXY_LISTEN", fmt.Sprintf("127.0.0.1:%d", proxyPort))
+
+	doc, err := config.Load(stackPath)
+	if err != nil {
+		t.Fatalf("load stack: %v", err)
+	}
+	graph, err := engine.BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	events := make(chan engine.Event, 64)
+	var drain sync.WaitGroup
+	drain.Add(1)
+	go func() {
+		defer drain.Done()
+		for range events {
+		}
+	}()
+
+	orch := engine.NewOrchestrator(runtime.Registry{
+		"process":                newHTTPRuntime(),
+		proxyruntime.RuntimeName: proxyruntime.New(),
+	})
+
+	deployment, err := orch.Up(stdcontext.Background(), doc, graph, events)
+	if err != nil {
+		t.Fatalf("up failed: %v", err)
+	}
+
+	client := &http.Client{Timeout: 200 * time.Millisecond}
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d/api/hello", proxyPort)
+	deadline := time.Now().Add(5 * time.Second)
+
+	var stableResp, canaryResp string
+	for stableResp == "" || canaryResp == "" {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for proxy responses: stable=%q canary=%q", stableResp, canaryResp)
+		}
+		if stableResp == "" {
+			req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+			if err != nil {
+				t.Fatalf("construct request: %v", err)
+			}
+			if body, err := issueRequest(client, req); err == nil {
+				stableResp = body
+			}
+		}
+		if canaryResp == "" {
+			req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+			if err != nil {
+				t.Fatalf("construct canary request: %v", err)
+			}
+			req.Header.Set("X-Canary", "1")
+			if body, err := issueRequest(client, req); err == nil {
+				canaryResp = body
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if stableResp != "stable:/hello" {
+		t.Fatalf("unexpected stable response: %q", stableResp)
+	}
+	if canaryResp != "canary:/hello" {
+		t.Fatalf("unexpected canary response: %q", canaryResp)
+	}
+
+	stopCtx, cancelStop := stdcontext.WithTimeout(stdcontext.Background(), 5*time.Second)
+	defer cancelStop()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("stop deployment: %v", err)
+	}
+
+	close(events)
+	drain.Wait()
+}
+
+func issueRequest(client *http.Client, req *http.Request) (string, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+	}
+	return string(body), nil
+}
+
+func allocatePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate port: %v", err)
+	}
+	defer listener.Close()
+	addr := listener.Addr().(*net.TCPAddr)
+	return addr.Port
 }
 
 func writeStackFile(t *testing.T, contents string) string {
@@ -521,4 +677,117 @@ func (i *mockInstance) Kill(ctx stdcontext.Context) error {
 
 func (i *mockInstance) Logs(ctx stdcontext.Context) (<-chan runtime.LogEntry, error) {
 	return i.logs, nil
+}
+
+type httpRuntime struct {
+	mu        sync.Mutex
+	instances map[string]*httpInstance
+}
+
+func newHTTPRuntime() *httpRuntime {
+	return &httpRuntime{instances: make(map[string]*httpInstance)}
+}
+
+func (h *httpRuntime) Start(ctx stdcontext.Context, spec runtime.StartSpec) (runtime.Handle, error) {
+	addr := spec.Env["LISTEN_ADDR"]
+	if addr == "" {
+		return nil, fmt.Errorf("service %s requires LISTEN_ADDR", spec.Name)
+	}
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", addr, err)
+	}
+
+	response := spec.Env["RESPONSE"]
+	if response == "" {
+		response = spec.Name
+	}
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "%s:%s", response, r.URL.Path)
+		}),
+	}
+
+	inst := &httpInstance{
+		server:   srv,
+		listener: listener,
+		ready:    make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+
+	h.mu.Lock()
+	h.instances[spec.Name] = inst
+	h.mu.Unlock()
+
+	go inst.serve()
+	close(inst.ready)
+
+	go func() {
+		<-ctx.Done()
+		_ = inst.server.Shutdown(stdcontext.Background())
+	}()
+
+	return inst, nil
+}
+
+type httpInstance struct {
+	server   *http.Server
+	listener net.Listener
+	ready    chan struct{}
+	done     chan struct{}
+
+	stopOnce sync.Once
+	waitErr  error
+}
+
+func (i *httpInstance) WaitReady(ctx stdcontext.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-i.ready:
+		return nil
+	}
+}
+
+func (i *httpInstance) Wait(ctx stdcontext.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-i.done:
+		return i.waitErr
+	}
+}
+
+func (i *httpInstance) Health() <-chan probe.State {
+	return nil
+}
+
+func (i *httpInstance) Stop(ctx stdcontext.Context) error {
+	var err error
+	i.stopOnce.Do(func() {
+		err = i.server.Shutdown(ctx)
+	})
+	return err
+}
+
+func (i *httpInstance) Kill(ctx stdcontext.Context) error {
+	var err error
+	i.stopOnce.Do(func() {
+		err = i.server.Close()
+	})
+	return err
+}
+
+func (i *httpInstance) Logs(ctx stdcontext.Context) (<-chan runtime.LogEntry, error) {
+	return nil, nil
+}
+
+func (i *httpInstance) serve() {
+	err := i.server.Serve(i.listener)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		i.waitErr = err
+	}
+	close(i.done)
 }

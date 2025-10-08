@@ -91,6 +91,10 @@ type StartSpec struct {
 	// primarily used by existing runtimes that need access to additional
 	// configuration that has not yet been promoted onto StartSpec.
 	Service *stack.Service
+
+	// Proxy carries the stack-level proxy configuration when the proxy runtime
+	// is requested.
+	Proxy *stack.Proxy
 }
 
 // Volume describes a bind mount exposed to the launched instance.

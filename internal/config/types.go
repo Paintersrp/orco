@@ -96,6 +96,53 @@ type ProxyAssetSpec struct {
 	Index     string `yaml:"index"`
 }
 
+// Clone creates a deep copy of the proxy configuration.
+func (p *ProxySpec) Clone() *ProxySpec {
+	if p == nil {
+		return nil
+	}
+	cp := &ProxySpec{}
+	if len(p.Routes) > 0 {
+		cp.Routes = make([]*ProxyRoute, 0, len(p.Routes))
+		for _, route := range p.Routes {
+			cp.Routes = append(cp.Routes, route.Clone())
+		}
+	}
+	if p.Assets != nil {
+		cp.Assets = p.Assets.Clone()
+	}
+	return cp
+}
+
+// Clone creates a deep copy of the proxy route configuration.
+func (r *ProxyRoute) Clone() *ProxyRoute {
+	if r == nil {
+		return nil
+	}
+	cp := &ProxyRoute{
+		PathPrefix:      r.PathPrefix,
+		Service:         r.Service,
+		Port:            r.Port,
+		StripPathPrefix: r.StripPathPrefix,
+	}
+	if len(r.Headers) > 0 {
+		cp.Headers = make(map[string]string, len(r.Headers))
+		for k, v := range r.Headers {
+			cp.Headers[k] = v
+		}
+	}
+	return cp
+}
+
+// Clone creates a deep copy of the proxy asset configuration.
+func (a *ProxyAssetSpec) Clone() *ProxyAssetSpec {
+	if a == nil {
+		return nil
+	}
+	cp := *a
+	return &cp
+}
+
 // ServiceSpec describes an individual service in the stack.
 type ServiceSpec struct {
 	Image           string            `yaml:"image"`
