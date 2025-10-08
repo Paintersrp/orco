@@ -251,7 +251,7 @@ func normalizeAddr(addr string) string {
 		// If parsing failed, trust caller.
 		return addr
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
+	if host == "" {
 		host = "127.0.0.1"
 	}
 	return net.JoinHostPort(host, port)

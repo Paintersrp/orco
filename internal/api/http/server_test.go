@@ -44,9 +44,11 @@ func TestNormalizeAddr(t *testing.T) {
 
 	tests := map[string]string{
 		"":           defaultAddr,
-		"0.0.0.0:80": "127.0.0.1:80",
-		"[::]:80":    "127.0.0.1:80",
+		":80":        "127.0.0.1:80",
+		"0.0.0.0:80": "0.0.0.0:80",
+		"[::]:80":    "[::]:80",
 		"host:9000":  "host:9000",
+		"[::1]:443":  "[::1]:443",
 	}
 
 	for input, expected := range tests {
