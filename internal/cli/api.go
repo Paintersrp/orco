@@ -96,11 +96,31 @@ func (apiCtrl *ControlAPI) Status(ctx stdcontext.Context) (*api.StatusReport, er
 
 // RestartService executes a rolling restart for the provided service using the orchestrator managed by the CLI context.
 func (apiCtrl *ControlAPI) RestartService(ctx stdcontext.Context, service string) (*api.RestartResult, error) {
+	if apiCtrl == nil || apiCtrl.ctx == nil {
+		return nil, fmt.Errorf("%w", api.ErrNoActiveDeployment)
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
 	return restartService(ctx, apiCtrl.ctx, service, nil)
 }
 
 // Apply reconciles stack changes using the orchestrator managed by the CLI context.
 func (apiCtrl *ControlAPI) Apply(ctx stdcontext.Context) (*api.ApplyResult, error) {
+	if apiCtrl == nil || apiCtrl.ctx == nil {
+		return nil, fmt.Errorf("%w", api.ErrNoActiveDeployment)
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
 	return runApply(ctx, apiCtrl.ctx, nil)
 }
 

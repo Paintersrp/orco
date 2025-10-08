@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -40,6 +41,13 @@ type Server struct {
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.Controller == nil {
 		return nil, fmt.Errorf("controller is required")
+	}
+	ctrlValue := reflect.ValueOf(cfg.Controller)
+	switch ctrlValue.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Interface, reflect.Ptr, reflect.Slice:
+		if ctrlValue.IsNil() {
+			return nil, fmt.Errorf("controller is required")
+		}
 	}
 	addr := normalizeAddr(cfg.Addr)
 	mux := http.NewServeMux()
