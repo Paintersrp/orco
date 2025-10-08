@@ -33,9 +33,14 @@ func newConfigLintCmd() *cobra.Command {
 				}
 			}
 
-			if _, err := config.Load(path); err != nil {
+			doc, err := config.Load(path)
+			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), err)
 				return err
+			}
+
+			for _, warning := range doc.Warnings {
+				fmt.Fprintf(cmd.OutOrStdout(), "warning: %s\n", warning)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: OK\n", path)

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -107,4 +108,70 @@ func normalizeHostIP(ip string) string {
 		return "0.0.0.0"
 	}
 	return ip
+}
+
+func collectVolumeConflicts(s *Stack) []string {
+	if len(s.Services) == 0 {
+		return nil
+	}
+
+	writable := make(map[string]map[string]struct{})
+	for serviceName, svc := range s.Services {
+		if svc == nil || len(svc.Volumes) == 0 {
+			continue
+		}
+		seen := make(map[string]struct{})
+		for _, spec := range svc.Volumes {
+			host, _, mode, err := splitVolumeSpec(spec)
+			if err != nil {
+				continue
+			}
+			host = filepath.Clean(host)
+			if host == "" {
+				continue
+			}
+			if mode == "" {
+				mode = "rw"
+			}
+			if !isWritableVolumeMode(mode) {
+				continue
+			}
+			if _, dup := seen[host]; dup {
+				continue
+			}
+			seen[host] = struct{}{}
+			serviceSet := writable[host]
+			if serviceSet == nil {
+				serviceSet = make(map[string]struct{})
+				writable[host] = serviceSet
+			}
+			serviceSet[serviceName] = struct{}{}
+		}
+	}
+
+	var warnings []string
+	for host, services := range writable {
+		if len(services) < 2 {
+			continue
+		}
+		names := make([]string, 0, len(services))
+		for name := range services {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		warnings = append(warnings, fmt.Sprintf("services %s share writable host path %q; consider mounting it as read-only (mode \"ro\") or using distinct host directories", strings.Join(names, ", "), host))
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+func isWritableVolumeMode(mode string) bool {
+	mode = strings.ToLower(mode)
+	parts := strings.Split(mode, ",")
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "ro" {
+			return false
+		}
+	}
+	return true
 }

@@ -53,6 +53,7 @@ type Stack struct {
 	Logging  *LoggingSpec            `yaml:"logging"`
 	Proxy    *ProxySpec              `yaml:"proxy"`
 	Services map[string]*ServiceSpec `yaml:"services"`
+	Warnings []string                `yaml:"-"`
 }
 
 // StackMeta contains metadata about the stack document.
@@ -266,6 +267,7 @@ func (s *Stack) ApplyDefaults() error {
 
 // Validate enforces schema invariants.
 func (s *Stack) Validate() error {
+	s.Warnings = nil
 	if s.Version == "" {
 		return fmt.Errorf("%s: is required", fieldPath("version"))
 	}
@@ -418,6 +420,7 @@ func (s *Stack) Validate() error {
 	if err := validatePortCollisions(s); err != nil {
 		return err
 	}
+	s.Warnings = collectVolumeConflicts(s)
 	return nil
 }
 
