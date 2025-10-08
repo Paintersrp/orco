@@ -105,6 +105,93 @@ services:
 	}
 }
 
+func TestLoadEnvDefaultFallback(t *testing.T) {
+	dir := t.TempDir()
+	workdir := filepath.Join(dir, "app")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	envFile := filepath.Join(workdir, "vars.env")
+	envFileContents := strings.Join([]string{
+		"FILE_ABSENT=${FILE_ABSENT:-file-default}",
+		"FILE_EMPTY=${FILE_EMPTY:-file-empty}",
+		"",
+	}, "\n")
+	if err := os.WriteFile(envFile, []byte(envFileContents), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	t.Setenv("STACK_WORKDIR", "")
+	t.Setenv("INLINE_EMPTY", "")
+	t.Setenv("ENV_FILE", "")
+	t.Setenv("FILE_EMPTY", "")
+	t.Setenv("DATA_DIR", "")
+	t.Setenv("LOG_DIR", "")
+
+	stackPath := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: defaults
+  workdir: ${STACK_WORKDIR:-./app}
+logging:
+  directory: ${LOG_DIR:-logs}
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    env:
+      INLINE_ABSENT: ${INLINE_ABSENT:-inline-default}
+      INLINE_EMPTY: ${INLINE_EMPTY:-inline-empty}
+    envFromFile: ${ENV_FILE:-./vars.env}
+    volumes: ["${DATA_DIR:-./data}:/var/data"]
+    health:
+      tcp:
+        address: localhost:1234
+`)
+	if err := os.WriteFile(stackPath, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := Load(stackPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if got, want := doc.Stack.Workdir, workdir; got != want {
+		t.Fatalf("workdir fallback mismatch: got %q want %q", got, want)
+	}
+	if doc.Logging == nil {
+		t.Fatalf("logging configuration missing")
+	}
+	if got, want := doc.Logging.Directory, filepath.Join(workdir, "logs"); got != want {
+		t.Fatalf("logging directory fallback mismatch: got %q want %q", got, want)
+	}
+
+	svc := doc.Services["api"]
+	if svc == nil {
+		t.Fatalf("service api missing")
+	}
+	if got, want := svc.EnvFromFile, envFile; got != want {
+		t.Fatalf("envFromFile fallback mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Env["INLINE_ABSENT"], "inline-default"; got != want {
+		t.Fatalf("inline absent env mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Env["INLINE_EMPTY"], "inline-empty"; got != want {
+		t.Fatalf("inline empty env mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Env["FILE_ABSENT"], "file-default"; got != want {
+		t.Fatalf("file absent env mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Env["FILE_EMPTY"], "file-empty"; got != want {
+		t.Fatalf("file empty env mismatch: got %q want %q", got, want)
+	}
+	expectedVolume := filepath.Join(workdir, "data") + ":/var/data"
+	if len(svc.Volumes) != 1 || svc.Volumes[0] != expectedVolume {
+		t.Fatalf("volume fallback mismatch: got %#v want %q", svc.Volumes, expectedVolume)
+	}
+}
+
 func TestLoadMissingStackName(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")
