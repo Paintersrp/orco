@@ -16,9 +16,9 @@ import (
 	"github.com/Paintersrp/orco/internal/engine"
 	"github.com/Paintersrp/orco/internal/logmux"
 	"github.com/Paintersrp/orco/internal/runtime"
-	"github.com/Paintersrp/orco/internal/runtime/docker"
-	"github.com/Paintersrp/orco/internal/runtime/process"
-	proxyruntime "github.com/Paintersrp/orco/internal/runtime/proxy"
+	_ "github.com/Paintersrp/orco/internal/runtime/docker"
+	_ "github.com/Paintersrp/orco/internal/runtime/process"
+	_ "github.com/Paintersrp/orco/internal/runtime/proxy"
 	"github.com/Paintersrp/orco/internal/stack"
 )
 
@@ -151,11 +151,7 @@ func (c *context) applyStackLogRetention(doc *cliutil.StackDocument) {
 
 func (c *context) getOrchestrator() *engine.Orchestrator {
 	if c.orchestrator == nil {
-		c.orchestrator = engine.NewOrchestrator(runtime.Registry{
-			"docker":                 docker.New(),
-			"process":                process.New(),
-			proxyruntime.RuntimeName: proxyruntime.New(),
-		})
+		c.orchestrator = engine.NewOrchestrator(runtime.NewRegistry())
 	}
 	return c.orchestrator
 }

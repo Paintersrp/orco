@@ -35,6 +35,10 @@ func New() runtime.Runtime {
 	return &runtimeImpl{}
 }
 
+func init() {
+	runtime.Register(RuntimeName, New)
+}
+
 type runtimeImpl struct{}
 
 // Start launches the proxy server according to the supplied specification.

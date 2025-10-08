@@ -38,6 +38,11 @@ func New() runtime.Runtime {
 	return &runtimeImpl{}
 }
 
+func init() {
+	runtime.Register("docker", New)
+	runtime.Register("podman", New)
+}
+
 func (r *runtimeImpl) getClient() (*client.Client, error) {
 	r.clientOnce.Do(func() {
 		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
