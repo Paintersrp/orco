@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Paintersrp/orco/internal/metrics"
 	"github.com/Paintersrp/orco/internal/stack"
 )
 
@@ -57,6 +58,31 @@ type LogObserver interface {
 
 type readyReporter interface {
 	Ready() bool
+}
+
+type contextKey string
+
+const serviceContextKey contextKey = "probe-service"
+
+// WithServiceContext annotates the context with the owning service name.
+func WithServiceContext(ctx context.Context, service string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, serviceContextKey, strings.TrimSpace(service))
+}
+
+// ServiceFromContext extracts a service name from the context if present.
+func ServiceFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value := ctx.Value(serviceContextKey); value != nil {
+		if service, ok := value.(string); ok {
+			return service
+		}
+	}
+	return ""
 }
 
 // New constructs an implementation of Prober for the supplied specification.
@@ -150,6 +176,7 @@ func Watch(ctx context.Context, prober Prober, spec *stack.Health, nowFn func() 
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	serviceName := ServiceFromContext(ctx)
 	go func() {
 		defer close(events)
 		if prober == nil || spec == nil {
@@ -189,7 +216,13 @@ func Watch(ctx context.Context, prober Prober, spec *stack.Health, nowFn func() 
 				attemptCtx, cancel = context.WithTimeout(ctx, timeout)
 			}
 
+			start := time.Now()
 			err := prober.Probe(attemptCtx)
+			label := ServiceFromContext(attemptCtx)
+			if label == "" {
+				label = serviceName
+			}
+			metrics.ObserveProbeLatency(label, time.Since(start))
 			cancel()
 
 			if ctx.Err() != nil {

@@ -11,7 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/Paintersrp/orco/internal/api"
+	"github.com/Paintersrp/orco/internal/metrics"
 )
 
 const (
@@ -42,6 +45,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.Controller == nil {
 		return nil, fmt.Errorf("controller (%T) is nil", cfg.Controller)
 	}
+	metrics.EmitBuildInfo()
 	ctrlValue := reflect.ValueOf(cfg.Controller)
 	switch ctrlValue.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Map, reflect.Interface, reflect.Ptr, reflect.Slice:
@@ -119,6 +123,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 	mux.HandleFunc("/api/v1/restart/", s.handleRestart)
 	mux.HandleFunc("/api/v1/apply", s.handleApply)
+	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

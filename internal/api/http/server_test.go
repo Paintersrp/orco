@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Paintersrp/orco/internal/api"
+	"github.com/Paintersrp/orco/internal/metrics"
 )
 
 type testController struct{}
@@ -241,6 +242,30 @@ func TestHandleApplyError(t *testing.T) {
 	}
 	if body.Code != "no_active_deployment" {
 		t.Fatalf("expected code no_active_deployment, got %q", body.Code)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	ctrl := &mockController{}
+	server := newTestServer(t, ctrl)
+
+	service := "http_metrics"
+	metrics.SetServiceReady(service, true)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from metrics endpoint, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	expected := fmt.Sprintf("orco_service_ready{service=\"%s\"} 1", service)
+	if !strings.Contains(body, expected) {
+		t.Fatalf("expected body to contain %q, got:\n%s", expected, body)
+	}
+	if !strings.Contains(body, "orco_build_info{") {
+		t.Fatalf("expected metrics output to include build info, got:\n%s", body)
 	}
 }
 

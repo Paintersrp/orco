@@ -12,6 +12,7 @@ import (
 
 	"github.com/Paintersrp/orco/internal/cliutil"
 	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/metrics"
 )
 
 // StatusTrackerOption configures a status tracker.
@@ -162,7 +163,7 @@ func (t *statusTracker) Apply(evt engine.Event) {
 				engine.EventTypeCrashed, engine.EventTypeFailed:
 				rep.ready = false
 			}
-			if evt.Type == engine.EventTypeCrashed {
+			if evt.Type == engine.EventTypeCrashed || (evt.Type == engine.EventTypeStopped && evt.Reason == engine.ReasonRestart) {
 				rep.restarts++
 			}
 		}
@@ -178,6 +179,7 @@ func (t *statusTracker) Apply(evt engine.Event) {
 		t.recordTransition(evt, state, message)
 	}
 
+	prevRestarts := state.restarts
 	totalRestarts := 0
 	ready := state.replicaCount > 0
 	readyCount := 0
@@ -200,6 +202,11 @@ func (t *statusTracker) Apply(evt engine.Event) {
 	state.readyReplicas = readyCount
 	if state.state == engine.EventTypeReady && !state.ready {
 		state.state = engine.EventTypeStarting
+	}
+
+	metrics.SetServiceReady(state.name, state.ready)
+	if delta := totalRestarts - prevRestarts; delta > 0 {
+		metrics.AddServiceRestarts(state.name, delta)
 	}
 }
 

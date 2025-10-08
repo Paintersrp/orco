@@ -12,6 +12,7 @@ import (
 
 	"github.com/Paintersrp/orco/internal/api"
 	"github.com/Paintersrp/orco/internal/engine"
+	"github.com/Paintersrp/orco/internal/metrics"
 	"github.com/Paintersrp/orco/internal/stack"
 )
 
@@ -108,6 +109,8 @@ func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep
 		}
 		updated = append(updated, name)
 
+		metrics.SetServiceReady(name, false)
+
 		strategy := "rolling"
 		if svcSpec.Update != nil && svcSpec.Update.Strategy != "" {
 			strategy = svcSpec.Update.Strategy
@@ -143,6 +146,7 @@ func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep
 			case updateErr = <-errCh:
 				ticker.Stop()
 				if updateErr != nil {
+					metrics.SetServiceReady(name, false)
 					rollbackErr := rollbackUpdates(ctx, dep, oldSpec, updated)
 					cliCtx.setDeployment(dep, stackName, oldSpec)
 					if rollbackErr != nil {
@@ -208,6 +212,7 @@ func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep
 		if status.Ready {
 			state = "Ready"
 		}
+		metrics.SetServiceReady(name, status.Ready)
 		if out != nil {
 			fmt.Fprintf(out, "Service %s ready (%d/%d replicas, %s)\n", name, ready, replicas, state)
 		}
