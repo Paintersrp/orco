@@ -25,6 +25,10 @@ func Load(path string) (*Stack, error) {
 		return nil, err
 	}
 
+	if err := validateAgainstSchema(mergedDoc); err != nil {
+		return nil, fmt.Errorf("%s: %w", absPath, err)
+	}
+
 	encoded, err := yaml.Marshal(mergedDoc)
 	if err != nil {
 		return nil, fmt.Errorf("%s: marshal merged configuration: %w", absPath, err)

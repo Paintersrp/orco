@@ -38,6 +38,7 @@ func newConfigLintCmd() *cobra.Command {
 				return err
 			}
 
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: OK\n", path)
 			return nil
 		},
 	}

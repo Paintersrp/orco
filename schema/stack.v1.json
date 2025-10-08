@@ -1,0 +1,441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orco.dev/schema/stack.v1.json",
+  "title": "Orco stack manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "stack", "services"],
+  "properties": {
+    "version": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "includes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "stack": {
+      "$ref": "#/$defs/stackMeta"
+    },
+    "defaults": {
+      "$ref": "#/$defs/defaults"
+    },
+    "logging": {
+      "$ref": "#/$defs/logging"
+    },
+    "proxy": {
+      "$ref": "#/$defs/proxy"
+    },
+    "services": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/service"
+      }
+    }
+  },
+  "$defs": {
+    "stackMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workdir": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "restartPolicy": {
+          "$ref": "#/$defs/restartPolicy"
+        },
+        "health": {
+          "$ref": "#/$defs/probe"
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxFileSize": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxTotalSize": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxFileAge": {
+          "$ref": "#/$defs/duration"
+        },
+        "maxFileCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/proxyRoute"
+          }
+        },
+        "assets": {
+          "$ref": "#/$defs/proxyAssets"
+        }
+      }
+    },
+    "proxyRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "port"],
+      "properties": {
+        "pathPrefix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          },
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "service": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stripPathPrefix": {
+          "type": "boolean"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["pathPrefix"]
+        },
+        {
+          "required": ["headers"]
+        }
+      ]
+    },
+    "proxyAssets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["directory"],
+      "properties": {
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "health"],
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime": {
+          "type": "string",
+          "enum": ["docker", "podman", "process"]
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "envFromFile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependency"
+          }
+        },
+        "health": {
+          "$ref": "#/$defs/probe"
+        },
+        "update": {
+          "$ref": "#/$defs/updateStrategy"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "restartPolicy": {
+          "$ref": "#/$defs/restartPolicy"
+        },
+        "resources": {
+          "$ref": "#/$defs/resources"
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target"],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "require": {
+          "type": "string",
+          "enum": ["", "ready", "started", "exists"]
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration"
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gracePeriod": {
+          "$ref": "#/$defs/duration"
+        },
+        "interval": {
+          "$ref": "#/$defs/duration"
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration"
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "successThreshold": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "http": {
+          "$ref": "#/$defs/httpProbe"
+        },
+        "tcp": {
+          "$ref": "#/$defs/tcpProbe"
+        },
+        "cmd": {
+          "$ref": "#/$defs/commandProbe"
+        },
+        "log": {
+          "$ref": "#/$defs/logProbe"
+        },
+        "expression": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "httpProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectStatus": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "tcpProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address"],
+      "properties": {
+        "address": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "commandProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration"
+        }
+      }
+    },
+    "logProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pattern"],
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "levels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "updateStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxUnavailable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxSurge": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "promoteAfter": {
+          "$ref": "#/$defs/duration"
+        }
+      }
+    },
+    "restartPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "backoff": {
+          "$ref": "#/$defs/backoff"
+        }
+      }
+    },
+    "backoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min": {
+          "$ref": "#/$defs/duration"
+        },
+        "max": {
+          "$ref": "#/$defs/duration"
+        },
+        "factor": {
+          "type": "number"
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "type": "string",
+          "minLength": 1
+        },
+        "memory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "memoryReservation": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "duration": {
+      "type": "string"
+    }
+  }
+}
