@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -18,6 +19,7 @@ func TestRegistryExposesMetrics(t *testing.T) {
 	metrics.EmitBuildInfo()
 	metrics.SetServiceReady(service, true)
 	metrics.AddServiceRestarts(service, 2)
+	metrics.ObserveProbeLatency(service, 150*time.Millisecond)
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -43,5 +45,19 @@ func TestRegistryExposesMetrics(t *testing.T) {
 	}
 	if !strings.Contains(body, "go_version=") {
 		t.Fatalf("expected go_version label on build info metric:\n%s", body)
+	}
+
+	latencySumLine := fmt.Sprintf("orco_probe_latency_seconds_sum{service=\"%s\"}", service)
+	if !strings.Contains(body, latencySumLine) {
+		t.Fatalf("expected latency sum metric line containing %q in body:\n%s", latencySumLine, body)
+	}
+	latencyCountLine := fmt.Sprintf("orco_probe_latency_seconds_count{service=\"%s\"} 1", service)
+	if !strings.Contains(body, latencyCountLine) {
+		t.Fatalf("expected latency count metric line %q in body:\n%s", latencyCountLine, body)
+	}
+	quantileOptionA := fmt.Sprintf("orco_probe_latency_seconds{service=\"%s\",quantile=\"0.5\"}", service)
+	quantileOptionB := fmt.Sprintf("orco_probe_latency_seconds{quantile=\"0.5\",service=\"%s\"}", service)
+	if !strings.Contains(body, quantileOptionA) && !strings.Contains(body, quantileOptionB) {
+		t.Fatalf("expected latency quantile metric containing either %q or %q in body:\n%s", quantileOptionA, quantileOptionB, body)
 	}
 }

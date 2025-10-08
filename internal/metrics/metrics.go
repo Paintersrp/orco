@@ -24,10 +24,11 @@ var (
 		Help:      "Total number of restarts initiated for each service.",
 	}, []string{"service"})
 
-	probeLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "orco",
-		Name:      "probe_latency_seconds",
-		Help:      "Latency of readiness probe executions in seconds.",
+	probeLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Namespace:  "orco",
+		Name:       "probe_latency_seconds",
+		Help:       "Latency of readiness probe executions in seconds.",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 	}, []string{"service"})
 
 	buildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
