@@ -122,6 +122,17 @@ func nextAvailablePort(hostIP string, start int, claimed map[int]map[string]*por
 			if len(hostClaims) == 0 {
 				return candidate
 			}
+
+			available := true
+			for _, claim := range hostClaims {
+				if claim != nil && len(claim.services) > 0 {
+					available = false
+					break
+				}
+			}
+			if available {
+				return candidate
+			}
 			continue
 		}
 

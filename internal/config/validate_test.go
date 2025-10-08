@@ -89,7 +89,7 @@ func TestValidatePortCollisions(t *testing.T) {
 
 func TestWildcardPortConflictsRegardlessOfOrder(t *testing.T) {
 	wildcard := testServiceSpec("0.0.0.0:8080:80")
-	specific := testServiceSpec("127.0.0.1:8080:80")
+	specific := testServiceSpec("127.0.0.1:8080:80", "127.0.0.1:8081:81")
 
 	t.Run("specific before wildcard", func(t *testing.T) {
 		claimed := map[int]map[string]*portClaim{}
@@ -102,7 +102,7 @@ func TestWildcardPortConflictsRegardlessOfOrder(t *testing.T) {
 			t.Fatalf("expected wildcard claim to fail, got nil")
 		}
 
-		for _, want := range []string{"host port 8080", "IP \"0.0.0.0\"", "service(s) specific, wildcard"} {
+		for _, want := range []string{"host port 8080", "IP \"0.0.0.0\"", "service(s) specific, wildcard", "next available port is 8082"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("expected error to contain %q, got %v", want, err)
 			}
@@ -120,7 +120,7 @@ func TestWildcardPortConflictsRegardlessOfOrder(t *testing.T) {
 			t.Fatalf("expected specific claim to fail, got nil")
 		}
 
-		for _, want := range []string{"host port 8080", "IP \"127.0.0.1\"", "service(s) specific, wildcard"} {
+		for _, want := range []string{"host port 8080", "IP \"127.0.0.1\"", "service(s) specific, wildcard", "next available port is 8081"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("expected error to contain %q, got %v", want, err)
 			}
