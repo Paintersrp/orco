@@ -738,6 +738,84 @@ services:
 	}
 }
 
+func TestLoadIncludeEnvironmentExpansion(t *testing.T) {
+	dir := t.TempDir()
+
+	basePath := filepath.Join(dir, "base.yaml")
+	baseManifest := []byte(`version: 0.1
+stack:
+  name: ${STACK_NAME:-base}
+  workdir: ${WORKDIR:-./app}
+services:
+  api:
+    image: ${API_IMAGE:-ghcr.io/demo/api:base}
+    runtime: docker
+    command: ["run", "${API_COMMAND:-serve}"]
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(basePath, baseManifest, 0o644); err != nil {
+		t.Fatalf("write base manifest: %v", err)
+	}
+
+	stackPath := filepath.Join(dir, "stack.yaml")
+	stackManifest := []byte(`includes:
+  - ${STACK_INCLUDE:-base.yaml}
+version: ${STACK_VERSION:-0.2}
+services:
+  api:
+    image: ${ROOT_IMAGE:-ghcr.io/demo/api:root}
+`)
+	if err := os.WriteFile(stackPath, stackManifest, 0o644); err != nil {
+		t.Fatalf("write stack manifest: %v", err)
+	}
+
+	t.Setenv("STACK_NAME", "demo-from-env")
+	t.Setenv("STACK_VERSION", "0.3")
+	t.Setenv("API_IMAGE", "ghcr.io/demo/api:env")
+	t.Setenv("ROOT_IMAGE", "ghcr.io/demo/api:root-env")
+
+	stack, err := Load(stackPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if got, want := stack.Version, "0.3"; got != want {
+		t.Fatalf("version mismatch: got %q want %q", got, want)
+	}
+	if got, want := stack.Stack.Name, "demo-from-env"; got != want {
+		t.Fatalf("stack name mismatch: got %q want %q", got, want)
+	}
+	expectedWorkdir := filepath.Join(dir, "app")
+	if got, want := stack.Stack.Workdir, expectedWorkdir; got != want {
+		t.Fatalf("workdir mismatch: got %q want %q", got, want)
+	}
+	if got, want := len(stack.Includes), 1; got != want {
+		t.Fatalf("unexpected include count: got %d want %d", got, want)
+	}
+	if stack.Includes[0] != "base.yaml" {
+		t.Fatalf("include reference not expanded: got %q want %q", stack.Includes[0], "base.yaml")
+	}
+
+	svc := stack.Services["api"]
+	if svc == nil {
+		t.Fatalf("api service missing")
+	}
+	if got, want := svc.Image, "ghcr.io/demo/api:root-env"; got != want {
+		t.Fatalf("service image mismatch: got %q want %q", got, want)
+	}
+	if len(svc.Command) != 2 || svc.Command[0] != "run" || svc.Command[1] != "serve" {
+		t.Fatalf("command not expanded: got %#v", svc.Command)
+	}
+	if svc.Health == nil || svc.Health.TCP == nil {
+		t.Fatalf("tcp health missing after merge")
+	}
+	if got, want := svc.Health.TCP.Address, "localhost:8080"; got != want {
+		t.Fatalf("tcp address mismatch: got %q want %q", got, want)
+	}
+}
+
 func TestLoadServiceGracePeriodZeroOverridesDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")
