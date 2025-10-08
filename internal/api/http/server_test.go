@@ -251,6 +251,7 @@ func TestMetricsEndpoint(t *testing.T) {
 
 	service := "http_metrics"
 	metrics.SetServiceReady(service, true)
+	metrics.ObserveProbeLatency(service, 200*time.Millisecond)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -263,6 +264,17 @@ func TestMetricsEndpoint(t *testing.T) {
 	expected := fmt.Sprintf("orco_service_ready{service=\"%s\"} 1", service)
 	if !strings.Contains(body, expected) {
 		t.Fatalf("expected body to contain %q, got:\n%s", expected, body)
+	}
+	if !strings.Contains(body, fmt.Sprintf("orco_probe_latency_seconds_sum{service=\"%s\"}", service)) {
+		t.Fatalf("expected metrics output to include latency sum for service %q, got:\n%s", service, body)
+	}
+	if !strings.Contains(body, fmt.Sprintf("orco_probe_latency_seconds_count{service=\"%s\"} 1", service)) {
+		t.Fatalf("expected metrics output to include latency count for service %q, got:\n%s", service, body)
+	}
+	quantileA := fmt.Sprintf("orco_probe_latency_seconds{service=\"%s\",quantile=\"0.5\"}", service)
+	quantileB := fmt.Sprintf("orco_probe_latency_seconds{quantile=\"0.5\",service=\"%s\"}", service)
+	if !strings.Contains(body, quantileA) && !strings.Contains(body, quantileB) {
+		t.Fatalf("expected metrics output to include latency quantile for service %q, got:\n%s", service, body)
 	}
 	if !strings.Contains(body, "orco_build_info{") {
 		t.Fatalf("expected metrics output to include build info, got:\n%s", body)
