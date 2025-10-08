@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	stdcontext "context"
+	"strings"
 	"testing"
 
 	"github.com/Paintersrp/orco/internal/api"
@@ -26,5 +27,8 @@ func TestNewServerRejectsTypedNilController(t *testing.T) {
 	_, err := NewServer(Config{Controller: ctrl})
 	if err == nil {
 		t.Fatalf("expected error when controller is typed nil")
+	}
+	if !strings.Contains(err.Error(), "testController") {
+		t.Fatalf("expected error to describe typed nil controller, got %v", err)
 	}
 }

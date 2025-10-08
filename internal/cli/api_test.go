@@ -18,4 +18,13 @@ func TestControlAPI_NilGuards(t *testing.T) {
 	if _, err := ctrl.Apply(stdcontext.Background()); !errors.Is(err, api.ErrNoActiveDeployment) {
 		t.Fatalf("expected ErrNoActiveDeployment for Apply, got %v", err)
 	}
+
+	var typedNil api.Controller = (*ControlAPI)(nil)
+	if _, err := typedNil.RestartService(stdcontext.Background(), "example"); !errors.Is(err, api.ErrNoActiveDeployment) {
+		t.Fatalf("expected ErrNoActiveDeployment for typed-nil RestartService, got %v", err)
+	}
+
+	if _, err := typedNil.Apply(stdcontext.Background()); !errors.Is(err, api.ErrNoActiveDeployment) {
+		t.Fatalf("expected ErrNoActiveDeployment for typed-nil Apply, got %v", err)
+	}
 }

@@ -40,13 +40,13 @@ type Server struct {
 // NewServer constructs a Server with sane defaults.
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.Controller == nil {
-		return nil, fmt.Errorf("controller is required")
+		return nil, fmt.Errorf("controller (%T) is nil", cfg.Controller)
 	}
 	ctrlValue := reflect.ValueOf(cfg.Controller)
 	switch ctrlValue.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Map, reflect.Interface, reflect.Ptr, reflect.Slice:
 		if ctrlValue.IsNil() {
-			return nil, fmt.Errorf("controller is required")
+			return nil, fmt.Errorf("controller (%T) is nil", cfg.Controller)
 		}
 	}
 	addr := normalizeAddr(cfg.Addr)

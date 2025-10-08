@@ -23,17 +23,24 @@ func NewControlAPI(ctx *context) *ControlAPI {
 	return &ControlAPI{ctx: ctx}
 }
 
-// Status returns the current orchestrator status snapshot.
-func (apiCtrl *ControlAPI) Status(ctx stdcontext.Context) (*api.StatusReport, error) {
+func (apiCtrl *ControlAPI) ensureActiveContext(ctx stdcontext.Context) error {
 	if apiCtrl == nil || apiCtrl.ctx == nil {
-		return nil, fmt.Errorf("%w", api.ErrNoActiveDeployment)
+		return fmt.Errorf("%w", api.ErrNoActiveDeployment)
 	}
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		default:
 		}
+	}
+	return nil
+}
+
+// Status returns the current orchestrator status snapshot.
+func (apiCtrl *ControlAPI) Status(ctx stdcontext.Context) (*api.StatusReport, error) {
+	if err := apiCtrl.ensureActiveContext(ctx); err != nil {
+		return nil, err
 	}
 	if apiCtrl.ctx.currentDeployment() == nil {
 		return nil, fmt.Errorf("%w for status", api.ErrNoActiveDeployment)
@@ -96,30 +103,16 @@ func (apiCtrl *ControlAPI) Status(ctx stdcontext.Context) (*api.StatusReport, er
 
 // RestartService executes a rolling restart for the provided service using the orchestrator managed by the CLI context.
 func (apiCtrl *ControlAPI) RestartService(ctx stdcontext.Context, service string) (*api.RestartResult, error) {
-	if apiCtrl == nil || apiCtrl.ctx == nil {
-		return nil, fmt.Errorf("%w", api.ErrNoActiveDeployment)
-	}
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
+	if err := apiCtrl.ensureActiveContext(ctx); err != nil {
+		return nil, err
 	}
 	return restartService(ctx, apiCtrl.ctx, service, nil)
 }
 
 // Apply reconciles stack changes using the orchestrator managed by the CLI context.
 func (apiCtrl *ControlAPI) Apply(ctx stdcontext.Context) (*api.ApplyResult, error) {
-	if apiCtrl == nil || apiCtrl.ctx == nil {
-		return nil, fmt.Errorf("%w", api.ErrNoActiveDeployment)
-	}
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
+	if err := apiCtrl.ensureActiveContext(ctx); err != nil {
+		return nil, err
 	}
 	return runApply(ctx, apiCtrl.ctx, nil)
 }
