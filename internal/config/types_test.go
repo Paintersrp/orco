@@ -251,6 +251,48 @@ func TestStackValidateLoggingConstraints(t *testing.T) {
 	}
 }
 
+func TestStackValidateAllowsPodmanRuntime(t *testing.T) {
+	stack := &Stack{
+		Version: "0.1",
+		Stack:   StackMeta{Name: "demo"},
+		Services: map[string]*ServiceSpec{
+			"api": {
+				Runtime:  "podman",
+				Image:    "ghcr.io/demo/api:latest",
+				Replicas: 1,
+				Health: &ProbeSpec{
+					TCP: &TCPProbeSpec{Address: "localhost:8080"},
+				},
+			},
+		},
+	}
+
+	if err := stack.Validate(); err != nil {
+		t.Fatalf("stack.Validate returned error: %v", err)
+	}
+}
+
+func TestStackValidatePodmanRequiresImage(t *testing.T) {
+	stack := &Stack{
+		Version: "0.1",
+		Stack:   StackMeta{Name: "demo"},
+		Services: map[string]*ServiceSpec{
+			"api": {
+				Runtime:  "podman",
+				Replicas: 1,
+				Health: &ProbeSpec{
+					TCP: &TCPProbeSpec{Address: "localhost:8080"},
+				},
+			},
+		},
+	}
+
+	err := stack.Validate()
+	if err == nil || !strings.Contains(err.Error(), "services.api.image") {
+		t.Fatalf("expected image error, got %v", err)
+	}
+}
+
 func int64Ptr(v int64) *int64 {
 	return &v
 }
