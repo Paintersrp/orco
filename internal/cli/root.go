@@ -17,6 +17,7 @@ import (
 	"github.com/Paintersrp/orco/internal/logmux"
 	"github.com/Paintersrp/orco/internal/runtime"
 	_ "github.com/Paintersrp/orco/internal/runtime/docker"
+	_ "github.com/Paintersrp/orco/internal/runtime/podman"
 	_ "github.com/Paintersrp/orco/internal/runtime/process"
 	_ "github.com/Paintersrp/orco/internal/runtime/proxy"
 	"github.com/Paintersrp/orco/internal/stack"
