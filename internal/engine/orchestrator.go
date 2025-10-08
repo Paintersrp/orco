@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Paintersrp/orco/internal/runtime"
+	proxyruntime "github.com/Paintersrp/orco/internal/runtime/proxy"
 	"github.com/Paintersrp/orco/internal/stack"
 )
 
@@ -460,11 +461,14 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 	}
 
 	handles := make(map[string]*serviceHandle, len(services))
+	proxyConfig := graph.ProxySpec()
+
 	for _, name := range services {
-		svc, ok := doc.Services[name]
-		if !ok {
+		svc := graph.ServiceSpec(name)
+		if svc == nil {
 			return nil, fmt.Errorf("service %s missing from stack", name)
 		}
+
 		runtimeImpl, ok := o.runtimes[svc.Runtime]
 		if !ok {
 			return nil, fmt.Errorf("service %s references unsupported runtime %q", name, svc.Runtime)
@@ -476,10 +480,21 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 		}
 
 		svcClone := svc.Clone()
+		if svcClone == nil {
+			svcClone = &stack.Service{}
+		}
+		if name == stackProxyServiceName {
+			svcClone.Runtime = proxyruntime.RuntimeName
+			svcClone.ResolvedWorkdir = doc.Stack.Workdir
+		}
 
 		replicas := make([]*replicaHandle, 0, replicaCount)
 		for idx := 0; idx < replicaCount; idx++ {
-			sup := newSupervisor(name, idx, svcClone, runtimeImpl, events)
+			var supProxy *stack.Proxy
+			if name == stackProxyServiceName && proxyConfig != nil {
+				supProxy = proxyConfig.Clone()
+			}
+			sup := newSupervisor(name, idx, svcClone, runtimeImpl, events, supProxy)
 			replicas = append(replicas, &replicaHandle{index: idx, supervisor: sup})
 		}
 
@@ -491,7 +506,7 @@ func (o *Orchestrator) Up(ctx context.Context, doc *stack.StackFile, graph *Grap
 	for i := len(services) - 1; i >= 0; i-- {
 		name := services[i]
 		handle := handles[name]
-		svc := doc.Services[name]
+		svc := graph.ServiceSpec(name)
 
 		for _, dep := range svc.DependsOn {
 			depHandle, ok := handles[dep.Target]

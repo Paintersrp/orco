@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"strings"
 
+	proxyruntime "github.com/Paintersrp/orco/internal/runtime/proxy"
 	"github.com/Paintersrp/orco/internal/stack"
 )
+
+const stackProxyServiceName = "__orco_proxy__"
 
 var errNilStackFile = errors.New("cannot build graph from a nil stack file")
 
@@ -16,6 +19,8 @@ type Graph struct {
 	edges    map[string][]string
 	reverse  map[string][]string
 	order    []string
+
+	proxy *stack.Proxy
 }
 
 // GraphServiceStatus captures the status information needed to render DOT output.
@@ -63,12 +68,52 @@ func BuildGraph(doc *stack.StackFile) (*Graph, error) {
 		}
 	}
 
+	if doc.Proxy != nil {
+		g.proxy = doc.Proxy.Clone()
+		proxySvc := &stack.Service{
+			Runtime:         proxyruntime.RuntimeName,
+			ResolvedWorkdir: doc.Stack.Workdir,
+		}
+		g.services[stackProxyServiceName] = proxySvc
+		if _, ok := g.edges[stackProxyServiceName]; !ok {
+			g.edges[stackProxyServiceName] = nil
+		}
+		deps := make(map[string]struct{})
+		for _, route := range doc.Proxy.Routes {
+			if route == nil || route.Service == "" {
+				continue
+			}
+			if _, ok := deps[route.Service]; !ok {
+				g.edges[stackProxyServiceName] = append(g.edges[stackProxyServiceName], route.Service)
+				deps[route.Service] = struct{}{}
+				proxySvc.DependsOn = append(proxySvc.DependsOn, stack.Dependency{Target: route.Service, Require: "ready"})
+			}
+			g.reverse[route.Service] = append(g.reverse[route.Service], stackProxyServiceName)
+		}
+	}
+
 	order, err := topoSort(g.edges)
 	if err != nil {
 		return nil, err
 	}
 	g.order = order
 	return g, nil
+}
+
+// ServiceSpec returns the service configuration associated with the named node.
+func (g *Graph) ServiceSpec(name string) *stack.Service {
+	if g == nil {
+		return nil
+	}
+	return g.services[name]
+}
+
+// ProxySpec returns the stack-level proxy configuration when present.
+func (g *Graph) ProxySpec() *stack.Proxy {
+	if g == nil || g.proxy == nil {
+		return nil
+	}
+	return g.proxy.Clone()
 }
 
 // Services returns service names in topological order.

@@ -43,6 +43,7 @@ type supervisor struct {
 	serviceMu sync.RWMutex
 	service   *stack.Service
 	runtime   runtime.Runtime
+	proxy     *stack.Proxy
 
 	events chan<- Event
 
@@ -75,7 +76,11 @@ type supervisor struct {
 	stopOnce sync.Once
 }
 
-func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runtime, events chan<- Event) *supervisor {
+func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runtime, events chan<- Event, proxy *stack.Proxy) *supervisor {
+	var proxyClone *stack.Proxy
+	if proxy != nil {
+		proxyClone = proxy.Clone()
+	}
 	sup := &supervisor{
 		name:      name,
 		replica:   replica,
@@ -86,6 +91,7 @@ func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runt
 		startedCh: make(chan error, 1),
 		done:      make(chan struct{}),
 		restartCh: make(chan *restartRequest),
+		proxy:     proxyClone,
 	}
 
 	sup.jitter = defaultJitter
@@ -122,7 +128,7 @@ func (s *supervisor) currentPolicy() restartPolicy {
 	return s.policy
 }
 
-func buildStartSpec(name string, replica int, svc *stack.Service) runtime.StartSpec {
+func buildStartSpec(name string, replica int, svc *stack.Service, proxy *stack.Proxy) runtime.StartSpec {
 	spec := runtime.StartSpec{Name: name}
 	if svc == nil {
 		return spec
@@ -158,6 +164,9 @@ func buildStartSpec(name string, replica int, svc *stack.Service) runtime.StartS
 		spec.Resources = svc.Resources.Clone()
 	}
 	spec.Service = svc.Clone()
+	if proxy != nil {
+		spec.Proxy = proxy.Clone()
+	}
 	return spec
 }
 
@@ -345,7 +354,7 @@ func (s *supervisor) run() {
 		}
 		sendEvent(s.events, s.name, s.replica, EventTypeStarting, "starting service", attempt, reason, nil)
 
-		spec := buildStartSpec(s.name, s.replica, s.serviceSpec())
+		spec := buildStartSpec(s.name, s.replica, s.serviceSpec(), s.proxy)
 		instance, err := s.runtime.Start(s.ctx, spec)
 		if err != nil {
 			if s.ctx.Err() != nil {

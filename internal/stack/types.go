@@ -7,6 +7,9 @@ type (
 	StackFile     = config.Stack
 	StackMeta     = config.StackMeta
 	Defaults      = config.Defaults
+	Proxy         = config.ProxySpec
+	ProxyRoute    = config.ProxyRoute
+	ProxyAssets   = config.ProxyAssetSpec
 	Service       = config.ServiceSpec
 	ServiceMap    = map[string]*Service
 	Dependency    = config.DepEdge
