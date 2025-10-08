@@ -20,6 +20,8 @@ func TestRegistryExposesMetrics(t *testing.T) {
 	metrics.SetServiceReady(service, true)
 	metrics.AddServiceRestarts(service, 2)
 	metrics.ObserveProbeLatency(service, 150*time.Millisecond)
+	metrics.ObserveUpdateOutcome(service, "success")
+	metrics.ObserveUpdateOutcome(service, "failure")
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -54,6 +56,14 @@ func TestRegistryExposesMetrics(t *testing.T) {
 	latencyCountLine := fmt.Sprintf("orco_probe_latency_seconds_count{service=\"%s\"} 1", service)
 	if !strings.Contains(body, latencyCountLine) {
 		t.Fatalf("expected latency count metric line %q in body:\n%s", latencyCountLine, body)
+	}
+	successLine := fmt.Sprintf("orco_update_outcome_total{outcome=\"success\",service=\"%s\"} 1", service)
+	if !strings.Contains(body, successLine) {
+		t.Fatalf("expected update success metric line %q in body:\n%s", successLine, body)
+	}
+	failureLine := fmt.Sprintf("orco_update_outcome_total{outcome=\"failure\",service=\"%s\"} 1", service)
+	if !strings.Contains(body, failureLine) {
+		t.Fatalf("expected update failure metric line %q in body:\n%s", failureLine, body)
 	}
 	quantileOptionA := fmt.Sprintf("orco_probe_latency_seconds{service=\"%s\",quantile=\"0.5\"}", service)
 	quantileOptionB := fmt.Sprintf("orco_probe_latency_seconds{quantile=\"0.5\",service=\"%s\"}", service)
