@@ -233,6 +233,110 @@ services:
 	}
 }
 
+func TestLoadProxyConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	workdir := filepath.Join(dir, "app")
+	staticDir := filepath.Join(workdir, "static")
+	if err := os.MkdirAll(staticDir, 0o755); err != nil {
+		t.Fatalf("mkdir static dir: %v", err)
+	}
+
+	t.Setenv("WORKDIR_PATH", "./app")
+	t.Setenv("STATIC_DIR", "./static")
+	t.Setenv("ROUTE_REGION", "us-west-2")
+
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+  workdir: ${WORKDIR_PATH}
+proxy:
+  assets:
+    directory: ${STATIC_DIR}
+    index: index.html
+  routes:
+    - pathPrefix: /api/
+      headers:
+        X-Region: ${ROUTE_REGION}
+      service: api
+      port: 8080
+      stripPathPrefix: true
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	stack, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if stack.Proxy == nil {
+		t.Fatalf("proxy configuration missing")
+	}
+	if got, want := len(stack.Proxy.Routes), 1; got != want {
+		t.Fatalf("unexpected route count: got %d want %d", got, want)
+	}
+	route := stack.Proxy.Routes[0]
+	if route == nil {
+		t.Fatalf("route was nil")
+	}
+	if got, want := route.PathPrefix, "/api/"; got != want {
+		t.Fatalf("path prefix mismatch: got %q want %q", got, want)
+	}
+	if got, want := route.Headers["X-Region"], "us-west-2"; got != want {
+		t.Fatalf("header expansion mismatch: got %q want %q", got, want)
+	}
+	if got, want := stack.Proxy.Assets.Directory, staticDir; got != want {
+		t.Fatalf("asset directory not resolved: got %q want %q", got, want)
+	}
+	if got, want := stack.Proxy.Assets.Index, filepath.Join(staticDir, "index.html"); got != want {
+		t.Fatalf("asset index not resolved: got %q want %q", got, want)
+	}
+}
+
+func TestLoadProxyInvalidRoute(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+proxy:
+  routes:
+    - pathPrefix: /api
+      service: missing
+      port: 8080
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "proxy.routes[0].service") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("error does not mention missing service: %v", err)
+	}
+}
+
 func TestLoadServiceGracePeriodZeroOverridesDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")

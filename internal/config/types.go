@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -49,6 +50,7 @@ type Stack struct {
 	Stack    StackMeta               `yaml:"stack"`
 	Defaults Defaults                `yaml:"defaults"`
 	Logging  *LoggingSpec            `yaml:"logging"`
+	Proxy    *ProxySpec              `yaml:"proxy"`
 	Services map[string]*ServiceSpec `yaml:"services"`
 }
 
@@ -71,6 +73,27 @@ type LoggingSpec struct {
 	MaxTotalSize *int64   `yaml:"maxTotalSize"`
 	MaxFileAge   Duration `yaml:"maxFileAge"`
 	MaxFileCount *int     `yaml:"maxFileCount"`
+}
+
+// ProxySpec configures HTTP proxy routing behaviour for the stack.
+type ProxySpec struct {
+	Routes []*ProxyRoute   `yaml:"routes"`
+	Assets *ProxyAssetSpec `yaml:"assets"`
+}
+
+// ProxyRoute defines a single routing rule matched on path prefixes and headers.
+type ProxyRoute struct {
+	PathPrefix      string            `yaml:"pathPrefix"`
+	Headers         map[string]string `yaml:"headers"`
+	Service         string            `yaml:"service"`
+	Port            int               `yaml:"port"`
+	StripPathPrefix bool              `yaml:"stripPathPrefix"`
+}
+
+// ProxyAssetSpec describes static assets that the proxy may serve directly.
+type ProxyAssetSpec struct {
+	Directory string `yaml:"directory"`
+	Index     string `yaml:"index"`
 }
 
 // ServiceSpec describes an individual service in the stack.
@@ -213,6 +236,53 @@ func (s *Stack) Validate() error {
 		}
 		if s.Logging.MaxFileAge.IsSet() && s.Logging.MaxFileAge.Duration < 0 {
 			return fmt.Errorf("%s: must be non-negative", fieldPath("logging", "maxFileAge"))
+		}
+	}
+	if s.Proxy != nil {
+		if len(s.Proxy.Routes) == 0 && s.Proxy.Assets == nil {
+			return fmt.Errorf("%s: must define at least one route or assets", fieldPath("proxy"))
+		}
+		for i, route := range s.Proxy.Routes {
+			if route == nil {
+				return fmt.Errorf("%s: route entry is null", proxyRouteField(i))
+			}
+			if strings.TrimSpace(route.Service) == "" {
+				return fmt.Errorf("%s: is required", proxyRouteField(i, "service"))
+			}
+			if _, ok := s.Services[route.Service]; !ok {
+				return fmt.Errorf("%s: references unknown service %q", proxyRouteField(i, "service"), route.Service)
+			}
+			if route.Port <= 0 {
+				return fmt.Errorf("%s: must be greater than zero", proxyRouteField(i, "port"))
+			}
+			if strings.TrimSpace(route.PathPrefix) == "" && len(route.Headers) == 0 {
+				return fmt.Errorf("%s: must define a pathPrefix or headers match", proxyRouteField(i))
+			}
+			if route.PathPrefix != "" && !strings.HasPrefix(route.PathPrefix, "/") {
+				return fmt.Errorf("%s: must begin with '/'", proxyRouteField(i, "pathPrefix"))
+			}
+			for key, value := range route.Headers {
+				if strings.TrimSpace(key) == "" {
+					return fmt.Errorf("%s: header name must be non-empty", proxyRouteField(i, "headers"))
+				}
+				if strings.TrimSpace(value) == "" {
+					return fmt.Errorf("%s: must have a value", proxyRouteField(i, "headers", key))
+				}
+			}
+		}
+		if s.Proxy.Assets != nil {
+			if strings.TrimSpace(s.Proxy.Assets.Directory) == "" {
+				return fmt.Errorf("%s: is required", proxyField("assets", "directory"))
+			}
+			if !filepath.IsAbs(s.Proxy.Assets.Directory) {
+				return fmt.Errorf("%s: must be an absolute path", proxyField("assets", "directory"))
+			}
+			if s.Proxy.Assets.Index != "" && strings.TrimSpace(s.Proxy.Assets.Index) == "" {
+				return fmt.Errorf("%s: is required", proxyField("assets", "index"))
+			}
+			if s.Proxy.Assets.Index != "" && !filepath.IsAbs(s.Proxy.Assets.Index) {
+				return fmt.Errorf("%s: must be an absolute path", proxyField("assets", "index"))
+			}
 		}
 	}
 	for name, svc := range s.Services {
@@ -604,6 +674,17 @@ func dependencyField(service string, index int, parts ...string) string {
 func probeField(service string, parts ...string) string {
 	pathParts := append([]string{"health"}, parts...)
 	return serviceField(service, pathParts...)
+}
+
+func proxyField(parts ...string) string {
+	pathParts := append([]string{"proxy"}, parts...)
+	return fieldPath(pathParts...)
+}
+
+func proxyRouteField(index int, parts ...string) string {
+	route := fmt.Sprintf("routes[%d]", index)
+	pathParts := append([]string{route}, parts...)
+	return proxyField(pathParts...)
 }
 
 // ServicesSorted returns service names sorted alphabetically.
