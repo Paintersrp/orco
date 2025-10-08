@@ -160,7 +160,8 @@ type waitOutcome struct {
 
 func newDockerInstance(cli *client.Client, id string, name string, health *stack.Health, memoryLimit string) *dockerInstance {
 	logCtx, logCancel := context.WithCancel(context.Background())
-	healthCtx, healthCancel := context.WithCancel(context.Background())
+	healthBase := probe.WithServiceContext(context.Background(), name)
+	healthCtx, healthCancel := context.WithCancel(healthBase)
 	return &dockerInstance{
 		cli:          cli,
 		containerID:  id,

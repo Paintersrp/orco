@@ -114,7 +114,8 @@ func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtim
 		inst.healthCh = make(chan probe.State, 1)
 		inst.readyCh = make(chan struct{})
 		inst.readyErr = make(chan error, 1)
-		inst.watchCtx, inst.watchCancel = context.WithCancel(context.Background())
+		baseWatchCtx := probe.WithServiceContext(context.Background(), spec.Name)
+		inst.watchCtx, inst.watchCancel = context.WithCancel(baseWatchCtx)
 
 		events := probe.Watch(inst.watchCtx, prober, inst.health, nil)
 		go inst.observeHealth(events)

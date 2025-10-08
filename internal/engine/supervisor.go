@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Paintersrp/orco/internal/metrics"
 	"github.com/Paintersrp/orco/internal/probe"
 	"github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/stack"
@@ -353,6 +354,7 @@ func (s *supervisor) run() {
 			reason = ReasonRestart
 		}
 		sendEvent(s.events, s.name, s.replica, EventTypeStarting, "starting service", attempt, reason, nil)
+		metrics.SetServiceReady(s.name, false)
 
 		spec := buildStartSpec(s.name, s.replica, s.serviceSpec(), s.proxy)
 		instance, err := s.runtime.Start(s.ctx, spec)
@@ -372,14 +374,17 @@ func (s *supervisor) run() {
 			}
 
 			sendEvent(s.events, s.name, s.replica, EventTypeCrashed, "start failed", attempt, ReasonStartFailure, err)
+			metrics.SetServiceReady(s.name, false)
 			if !s.allowRestart(restarts) {
 				sendEvent(s.events, s.name, s.replica, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, err)
+				metrics.SetServiceReady(s.name, false)
 				s.deliverStarted(err)
 				s.deliverInitial(err)
 				s.setRunErr(err)
 				return
 			}
 
+			metrics.IncrementServiceRestart(s.name)
 			restarts++
 			if pending == nil {
 				if err := s.sleepBackoff(&backoffBase); err != nil {
@@ -399,6 +404,7 @@ func (s *supervisor) run() {
 
 		if next != nil {
 			pending = next
+			metrics.IncrementServiceRestart(s.name)
 			restarts++
 			backoffBase = s.currentPolicy().min
 			continue
@@ -429,8 +435,10 @@ func (s *supervisor) run() {
 		}
 
 		sendEvent(s.events, s.name, s.replica, EventTypeCrashed, "instance crashed", attempt, ReasonInstanceCrash, instErr)
+		metrics.SetServiceReady(s.name, false)
 		if !s.allowRestart(restarts) {
 			sendEvent(s.events, s.name, s.replica, EventTypeFailed, "service failed", attempt, ReasonRetriesExhaust, instErr)
+			metrics.SetServiceReady(s.name, false)
 			if !ready {
 				s.deliverInitial(instErr)
 			}
@@ -438,6 +446,7 @@ func (s *supervisor) run() {
 			return
 		}
 
+		metrics.IncrementServiceRestart(s.name)
 		restarts++
 		if pending == nil {
 			if err := s.sleepBackoff(&backoffBase); err != nil {
@@ -539,6 +548,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 				stopCtx, cancel = failureStopContext()
 			}
 			sendEvent(s.events, s.name, s.replica, EventTypeStopping, "stopping for restart", attempt, ReasonRestart, nil)
+			metrics.SetServiceReady(s.name, false)
 			err := s.stopInstance(instance, stopCtx)
 			if cancel != nil {
 				cancel()
@@ -573,6 +583,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 				pendingRestart = nil
 			}
 			if healthCh == nil {
+				metrics.SetServiceReady(s.name, true)
 				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			}
 		case state, ok := <-healthCh:
@@ -602,6 +613,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 					s.finishRestart(pendingRestart, nil)
 					pendingRestart = nil
 				}
+				metrics.SetServiceReady(s.name, true)
 				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
 			case probe.StatusUnready:
 				if !readyObserved {
@@ -622,6 +634,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 					}
 					return errors.New("service reported unready"), readyObserved, nil
 				}
+				metrics.SetServiceReady(s.name, false)
 				sendEvent(s.events, s.name, s.replica, EventTypeUnready, "service unready", attempt, ReasonProbeUnready, state.Err)
 				ctx, cancel := failureStopContext()
 				_ = s.stopInstance(instance, ctx)
@@ -632,6 +645,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 			if manualRestart != nil {
 				logWG.Wait()
 				sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped for restart", attempt, ReasonRestart, nil)
+				metrics.SetServiceReady(s.name, false)
 				return nil, readyObserved, manualRestart
 			}
 			if s.ctx.Err() != nil {
@@ -647,6 +661,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 				s.setStopErr(stopErr)
 				logWG.Wait()
 				sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
+				metrics.SetServiceReady(s.name, false)
 				return nil, readyObserved, nil
 			}
 			exitErr := err
@@ -678,6 +693,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 			s.setStopErr(err)
 			logWG.Wait()
 			sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
+			metrics.SetServiceReady(s.name, false)
 			return nil, readyObserved, nil
 		}
 	}
