@@ -147,6 +147,7 @@ func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep
 				ticker.Stop()
 				if updateErr != nil {
 					metrics.SetServiceReady(name, false)
+					metrics.ObserveUpdateOutcome(name, "failure")
 					rollbackErr := rollbackUpdates(ctx, dep, oldSpec, updated)
 					cliCtx.setDeployment(dep, stackName, oldSpec)
 					if rollbackErr != nil {
@@ -174,6 +175,7 @@ func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep
 				}
 			case <-ctx.Done():
 				ticker.Stop()
+				metrics.ObserveUpdateOutcome(name, "failure")
 				return ctx.Err()
 			}
 		}
@@ -213,6 +215,7 @@ func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep
 			state = "Ready"
 		}
 		metrics.SetServiceReady(name, status.Ready)
+		metrics.ObserveUpdateOutcome(name, "success")
 		if out != nil {
 			fmt.Fprintf(out, "Service %s ready (%d/%d replicas, %s)\n", name, ready, replicas, state)
 		}

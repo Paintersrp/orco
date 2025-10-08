@@ -24,6 +24,12 @@ var (
 		Help:      "Total number of restarts initiated for each service.",
 	}, []string{"service"})
 
+	updateOutcome = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "orco",
+		Name:      "update_outcome_total",
+		Help:      "Total number of update outcomes by service and result.",
+	}, []string{"service", "outcome"})
+
 	probeLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace:  "orco",
 		Name:       "probe_latency_seconds",
@@ -41,7 +47,7 @@ var (
 )
 
 func init() {
-	registry.MustRegister(serviceReady, serviceRestarts, probeLatency, buildInfo)
+	registry.MustRegister(serviceReady, serviceRestarts, probeLatency, buildInfo, updateOutcome)
 }
 
 // Registry returns the Prometheus registry containing all orco metrics.
@@ -83,6 +89,18 @@ func ObserveProbeLatency(service string, d time.Duration) {
 	probeLatency.WithLabelValues(label).Observe(d.Seconds())
 }
 
+// ObserveUpdateOutcome increments the counter for an update result on a service.
+func ObserveUpdateOutcome(service, outcome string) {
+	serviceLabel := service
+	if serviceLabel == "" {
+		serviceLabel = "unknown"
+	}
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	updateOutcome.WithLabelValues(serviceLabel, outcome).Inc()
+}
+
 // EmitBuildInfo publishes build metadata about the running binary.
 func EmitBuildInfo() {
 	buildInfoOnce.Do(func() {
@@ -122,4 +140,5 @@ func ResetService(service string) {
 	serviceReady.DeleteLabelValues(service)
 	serviceRestarts.DeleteLabelValues(service)
 	probeLatency.DeleteLabelValues(service)
+	updateOutcome.DeletePartialMatch(prometheus.Labels{"service": service})
 }
