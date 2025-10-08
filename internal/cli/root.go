@@ -41,11 +41,11 @@ func newRootCommand() (*cobra.Command, *context) {
 	root.PersistentFlags().
 		StringVarP(&stackFile, "file", "f", "stack.yaml", "Path to stack definition")
 
-	root.PersistentFlags().StringVar(&logRetention.Directory, "log-dir", logRetention.Directory, "Directory to persist service logs")
-	root.PersistentFlags().Int64Var(&logRetention.MaxFileSize, "log-max-file-size", logRetention.MaxFileSize, "Maximum size of individual log files before rotation")
-	root.PersistentFlags().Int64Var(&logRetention.MaxTotalSize, "log-max-total-size", logRetention.MaxTotalSize, "Maximum total size of retained log files per service")
-	root.PersistentFlags().DurationVar(&logRetention.MaxFileAge, "log-max-file-age", logRetention.MaxFileAge, "Maximum age of a log file before rotation")
-	root.PersistentFlags().IntVar(&logRetention.MaxFileCount, "log-max-files", logRetention.MaxFileCount, "Maximum number of log files to retain per service")
+	root.PersistentFlags().Var(&stringFlag{value: &logRetention.Directory, set: &logRetention.DirectorySet}, "log-dir", "Directory to persist service logs")
+	root.PersistentFlags().Var(&int64Flag{value: &logRetention.MaxFileSize, set: &logRetention.MaxFileSizeSet}, "log-max-file-size", "Maximum size of individual log files before rotation")
+	root.PersistentFlags().Var(&int64Flag{value: &logRetention.MaxTotalSize, set: &logRetention.MaxTotalSizeSet}, "log-max-total-size", "Maximum total size of retained log files per service")
+	root.PersistentFlags().Var(&durationFlag{value: &logRetention.MaxFileAge, set: &logRetention.MaxFileAgeSet}, "log-max-file-age", "Maximum age of a log file before rotation")
+	root.PersistentFlags().Var(&intFlag{value: &logRetention.MaxFileCount, set: &logRetention.MaxFileCountSet}, "log-max-files", "Maximum number of log files to retain per service")
 
 	ctx := &context{stackFile: &stackFile, logRetention: &logRetention}
 	root.AddCommand(newUpCmd(ctx))
@@ -98,10 +98,54 @@ type logRetentionConfig struct {
 	MaxTotalSize int64
 	MaxFileAge   time.Duration
 	MaxFileCount int
+
+	DirectorySet    bool
+	MaxFileSizeSet  bool
+	MaxTotalSizeSet bool
+	MaxFileAgeSet   bool
+	MaxFileCountSet bool
 }
 
 func (c *context) loadStack() (*cliutil.StackDocument, error) {
-	return cliutil.LoadStackFromFile(*c.stackFile)
+	doc, err := cliutil.LoadStackFromFile(*c.stackFile)
+	if err != nil {
+		return nil, err
+	}
+	c.applyStackLogRetention(doc)
+	return doc, nil
+}
+
+func (c *context) applyStackLogRetention(doc *cliutil.StackDocument) {
+	if doc == nil || doc.File == nil {
+		return
+	}
+	logging := doc.File.Logging
+	if logging == nil {
+		return
+	}
+	cfg := c.logRetention
+	if cfg == nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if logging.Directory != "" && !cfg.DirectorySet {
+		cfg.Directory = logging.Directory
+	}
+	if logging.MaxFileSize != nil && !cfg.MaxFileSizeSet {
+		cfg.MaxFileSize = *logging.MaxFileSize
+	}
+	if logging.MaxTotalSize != nil && !cfg.MaxTotalSizeSet {
+		cfg.MaxTotalSize = *logging.MaxTotalSize
+	}
+	if logging.MaxFileAge.IsSet() && !cfg.MaxFileAgeSet {
+		cfg.MaxFileAge = logging.MaxFileAge.Duration
+	}
+	if logging.MaxFileCount != nil && !cfg.MaxFileCountSet {
+		cfg.MaxFileCount = *logging.MaxFileCount
+	}
 }
 
 func (c *context) getOrchestrator() *engine.Orchestrator {
@@ -384,26 +428,141 @@ func (s *eventStream) Close() {
 
 func logRetentionFromEnv() logRetentionConfig {
 	cfg := logRetentionConfig{}
-	cfg.Directory = os.Getenv("ORCO_LOG_DIR")
-	if value := os.Getenv("ORCO_LOG_MAX_FILE_SIZE"); value != "" {
-		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
+	if value, ok := os.LookupEnv("ORCO_LOG_DIR"); ok {
+		cfg.Directory = value
+		cfg.DirectorySet = value != ""
+	}
+	if value, ok := os.LookupEnv("ORCO_LOG_MAX_FILE_SIZE"); ok {
+		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size >= 0 {
 			cfg.MaxFileSize = size
+			cfg.MaxFileSizeSet = true
 		}
 	}
-	if value := os.Getenv("ORCO_LOG_MAX_TOTAL_SIZE"); value != "" {
-		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size > 0 {
+	if value, ok := os.LookupEnv("ORCO_LOG_MAX_TOTAL_SIZE"); ok {
+		if size, err := strconv.ParseInt(value, 10, 64); err == nil && size >= 0 {
 			cfg.MaxTotalSize = size
+			cfg.MaxTotalSizeSet = true
 		}
 	}
-	if value := os.Getenv("ORCO_LOG_MAX_FILE_AGE"); value != "" {
-		if age, err := time.ParseDuration(value); err == nil && age > 0 {
+	if value, ok := os.LookupEnv("ORCO_LOG_MAX_FILE_AGE"); ok {
+		if age, err := time.ParseDuration(value); err == nil && age >= 0 {
 			cfg.MaxFileAge = age
+			cfg.MaxFileAgeSet = true
 		}
 	}
-	if value := os.Getenv("ORCO_LOG_MAX_FILE_COUNT"); value != "" {
-		if count, err := strconv.Atoi(value); err == nil && count > 0 {
+	if value, ok := os.LookupEnv("ORCO_LOG_MAX_FILE_COUNT"); ok {
+		if count, err := strconv.Atoi(value); err == nil && count >= 0 {
 			cfg.MaxFileCount = count
+			cfg.MaxFileCountSet = true
 		}
 	}
 	return cfg
 }
+
+type stringFlag struct {
+	value *string
+	set   *bool
+}
+
+func (f *stringFlag) Set(value string) error {
+	if f.value != nil {
+		*f.value = value
+	}
+	if f.set != nil {
+		*f.set = true
+	}
+	return nil
+}
+
+func (f *stringFlag) String() string {
+	if f.value == nil {
+		return ""
+	}
+	return *f.value
+}
+
+func (f *stringFlag) Type() string { return "string" }
+
+type int64Flag struct {
+	value *int64
+	set   *bool
+}
+
+func (f *int64Flag) Set(raw string) error {
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return err
+	}
+	if f.value != nil {
+		*f.value = v
+	}
+	if f.set != nil {
+		*f.set = true
+	}
+	return nil
+}
+
+func (f *int64Flag) String() string {
+	if f.value == nil {
+		return "0"
+	}
+	return strconv.FormatInt(*f.value, 10)
+}
+
+func (f *int64Flag) Type() string { return "int64" }
+
+type intFlag struct {
+	value *int
+	set   *bool
+}
+
+func (f *intFlag) Set(raw string) error {
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return err
+	}
+	if f.value != nil {
+		*f.value = v
+	}
+	if f.set != nil {
+		*f.set = true
+	}
+	return nil
+}
+
+func (f *intFlag) String() string {
+	if f.value == nil {
+		return "0"
+	}
+	return strconv.Itoa(*f.value)
+}
+
+func (f *intFlag) Type() string { return "int" }
+
+type durationFlag struct {
+	value *time.Duration
+	set   *bool
+}
+
+func (f *durationFlag) Set(raw string) error {
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		return err
+	}
+	if f.value != nil {
+		*f.value = v
+	}
+	if f.set != nil {
+		*f.set = true
+	}
+	return nil
+}
+
+func (f *durationFlag) String() string {
+	if f.value == nil {
+		return "0s"
+	}
+	return f.value.String()
+}
+
+func (f *durationFlag) Type() string { return "duration" }

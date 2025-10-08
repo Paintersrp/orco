@@ -48,6 +48,7 @@ type Stack struct {
 	Version  string                  `yaml:"version"`
 	Stack    StackMeta               `yaml:"stack"`
 	Defaults Defaults                `yaml:"defaults"`
+	Logging  *LoggingSpec            `yaml:"logging"`
 	Services map[string]*ServiceSpec `yaml:"services"`
 }
 
@@ -61,6 +62,15 @@ type StackMeta struct {
 type Defaults struct {
 	Restart *RestartPolicy `yaml:"restartPolicy"`
 	Health  *ProbeSpec     `yaml:"health"`
+}
+
+// LoggingSpec configures log persistence defaults for the stack.
+type LoggingSpec struct {
+	Directory    string   `yaml:"directory"`
+	MaxFileSize  *int64   `yaml:"maxFileSize"`
+	MaxTotalSize *int64   `yaml:"maxTotalSize"`
+	MaxFileAge   Duration `yaml:"maxFileAge"`
+	MaxFileCount *int     `yaml:"maxFileCount"`
 }
 
 // ServiceSpec describes an individual service in the stack.
@@ -190,6 +200,20 @@ func (s *Stack) Validate() error {
 	}
 	if s.Stack.Name == "" {
 		return fmt.Errorf("%s: is required", fieldPath("stack", "name"))
+	}
+	if s.Logging != nil {
+		if s.Logging.MaxFileSize != nil && *s.Logging.MaxFileSize < 0 {
+			return fmt.Errorf("%s: must be non-negative", fieldPath("logging", "maxFileSize"))
+		}
+		if s.Logging.MaxTotalSize != nil && *s.Logging.MaxTotalSize < 0 {
+			return fmt.Errorf("%s: must be non-negative", fieldPath("logging", "maxTotalSize"))
+		}
+		if s.Logging.MaxFileCount != nil && *s.Logging.MaxFileCount < 0 {
+			return fmt.Errorf("%s: must be non-negative", fieldPath("logging", "maxFileCount"))
+		}
+		if s.Logging.MaxFileAge.IsSet() && s.Logging.MaxFileAge.Duration < 0 {
+			return fmt.Errorf("%s: must be non-negative", fieldPath("logging", "maxFileAge"))
+		}
 	}
 	for name, svc := range s.Services {
 		if svc.Runtime == "" {
