@@ -398,6 +398,232 @@ services:
 	}
 }
 
+func TestLoadIncludesMerge(t *testing.T) {
+	dir := t.TempDir()
+
+	basePath := filepath.Join(dir, "base.yaml")
+	baseManifest := []byte(`version: 0.1
+stack:
+  name: base
+  workdir: app
+services:
+  api:
+    image: ghcr.io/demo/api:base
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(basePath, baseManifest, 0o644); err != nil {
+		t.Fatalf("write base include: %v", err)
+	}
+
+	extraPath := filepath.Join(dir, "extra.yaml")
+	extraManifest := []byte(`services:
+  worker:
+    image: ghcr.io/demo/worker:latest
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:9090
+`)
+	if err := os.WriteFile(extraPath, extraManifest, 0o644); err != nil {
+		t.Fatalf("write extra include: %v", err)
+	}
+
+	stackPath := filepath.Join(dir, "stack.yaml")
+	stackManifest := []byte(`includes:
+  - base.yaml
+  - extra.yaml
+stack:
+  name: final
+services:
+  api:
+    image: ghcr.io/demo/api:final
+`)
+	if err := os.WriteFile(stackPath, stackManifest, 0o644); err != nil {
+		t.Fatalf("write stack manifest: %v", err)
+	}
+
+	stack, err := Load(stackPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if got, want := stack.Version, "0.1"; got != want {
+		t.Fatalf("version mismatch: got %q want %q", got, want)
+	}
+	if got, want := stack.Stack.Name, "final"; got != want {
+		t.Fatalf("stack name mismatch: got %q want %q", got, want)
+	}
+	if got, want := stack.Stack.Workdir, filepath.Join(dir, "app"); got != want {
+		t.Fatalf("workdir mismatch: got %q want %q", got, want)
+	}
+	if got, want := len(stack.Includes), 2; got != want {
+		t.Fatalf("unexpected include count: got %d want %d", got, want)
+	}
+	if stack.Includes[0] != "base.yaml" || stack.Includes[1] != "extra.yaml" {
+		t.Fatalf("includes not preserved: got %v", stack.Includes)
+	}
+
+	api := stack.Services["api"]
+	if api == nil {
+		t.Fatalf("api service missing")
+	}
+	if got, want := api.Image, "ghcr.io/demo/api:final"; got != want {
+		t.Fatalf("api image mismatch: got %q want %q", got, want)
+	}
+	if got, want := api.Runtime, "docker"; got != want {
+		t.Fatalf("api runtime mismatch: got %q want %q", got, want)
+	}
+	if api.Health == nil {
+		t.Fatalf("api health not merged")
+	}
+
+	worker := stack.Services["worker"]
+	if worker == nil {
+		t.Fatalf("worker service missing")
+	}
+	if got, want := worker.Image, "ghcr.io/demo/worker:latest"; got != want {
+		t.Fatalf("worker image mismatch: got %q want %q", got, want)
+	}
+	if worker.Health == nil {
+		t.Fatalf("worker health not merged")
+	}
+}
+
+func TestLoadIncludeOverridePrecedence(t *testing.T) {
+	dir := t.TempDir()
+
+	basePath := filepath.Join(dir, "base.yaml")
+	baseManifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    image: ghcr.io/demo/api:base
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(basePath, baseManifest, 0o644); err != nil {
+		t.Fatalf("write base include: %v", err)
+	}
+
+	overridePath := filepath.Join(dir, "override.yaml")
+	overrideManifest := []byte(`services:
+  api:
+    image: ghcr.io/demo/api:override
+`)
+	if err := os.WriteFile(overridePath, overrideManifest, 0o644); err != nil {
+		t.Fatalf("write override include: %v", err)
+	}
+
+	stackPath := filepath.Join(dir, "stack.yaml")
+	stackManifest := []byte(`includes:
+  - base.yaml
+  - override.yaml
+`)
+	if err := os.WriteFile(stackPath, stackManifest, 0o644); err != nil {
+		t.Fatalf("write stack manifest: %v", err)
+	}
+
+	stack, err := Load(stackPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	api := stack.Services["api"]
+	if api == nil {
+		t.Fatalf("api service missing")
+	}
+	if got, want := api.Image, "ghcr.io/demo/api:override"; got != want {
+		t.Fatalf("override precedence failed: got %q want %q", got, want)
+	}
+	if api.Health == nil {
+		t.Fatalf("api health missing after merge")
+	}
+}
+
+func TestLoadIncludeMissingFile(t *testing.T) {
+	dir := t.TempDir()
+
+	stackPath := filepath.Join(dir, "stack.yaml")
+	stackManifest := []byte(`version: 0.1
+includes:
+  - missing.yaml
+stack:
+  name: demo
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(stackPath, stackManifest, 0o644); err != nil {
+		t.Fatalf("write stack manifest: %v", err)
+	}
+
+	_, err := Load(stackPath)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing.yaml") {
+		t.Fatalf("error does not mention missing include: %v", err)
+	}
+	if !strings.Contains(err.Error(), "include") {
+		t.Fatalf("error does not mention include context: %v", err)
+	}
+}
+
+func TestLoadIncludeCycle(t *testing.T) {
+	dir := t.TempDir()
+
+	aPath := filepath.Join(dir, "a.yaml")
+	bPath := filepath.Join(dir, "b.yaml")
+
+	aManifest := []byte(`includes:
+  - b.yaml
+version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    image: ghcr.io/demo/api:a
+    runtime: docker
+    health:
+      tcp:
+        address: localhost:8080
+`)
+	if err := os.WriteFile(aPath, aManifest, 0o644); err != nil {
+		t.Fatalf("write a manifest: %v", err)
+	}
+
+	bManifest := []byte(`includes:
+  - a.yaml
+services:
+  api:
+    image: ghcr.io/demo/api:b
+`)
+	if err := os.WriteFile(bPath, bManifest, 0o644); err != nil {
+		t.Fatalf("write b manifest: %v", err)
+	}
+
+	_, err := Load(aPath)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("error does not report cycle: %v", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Base(aPath)) || !strings.Contains(err.Error(), filepath.Base(bPath)) {
+		t.Fatalf("error does not include cycle members: %v", err)
+	}
+}
+
 func TestLoadServiceGracePeriodZeroOverridesDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")
