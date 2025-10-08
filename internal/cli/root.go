@@ -59,6 +59,7 @@ func newRootCommand() (*cobra.Command, *context) {
 	root.AddCommand(newApplyCmd(ctx))
 	root.AddCommand(newPromoteCmd(ctx))
 	root.AddCommand(newTuiCmd(ctx))
+	root.AddCommand(newServeCmd(ctx))
 	root.AddCommand(newConfigCmd())
 
 	root.SilenceUsage = true

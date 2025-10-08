@@ -118,6 +118,10 @@ func runUpInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocume
 }
 
 func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument) (retErr error) {
+	return runUpNonInteractiveWithHook(cmd, ctx, doc, nil)
+}
+
+func runUpNonInteractiveWithHook(cmd *cobra.Command, ctx *context, doc *cliutil.StackDocument, onReady func(stdcontext.Context) (func() error, error)) (retErr error) {
 	events := make(chan engine.Event, 64)
 	trackedEvents, releaseStream := ctx.trackEvents(doc.File.Stack.Name, events, cap(events))
 	var printer sync.WaitGroup
@@ -134,6 +138,7 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 	defer cancelGuard()
 
 	var deployment *engine.Deployment
+	var readyCleanup func() error
 	defer func() {
 		if deployment != nil {
 			stopCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
@@ -144,6 +149,11 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 			}
 			cancel()
 			ctx.clearDeployment(deployment)
+		}
+		if readyCleanup != nil {
+			if err := readyCleanup(); err != nil && retErr == nil {
+				retErr = err
+			}
 		}
 		releaseStream()
 		close(events)
@@ -159,6 +169,14 @@ func runUpNonInteractive(cmd *cobra.Command, ctx *context, doc *cliutil.StackDoc
 	}
 
 	ctx.setDeployment(deployment, doc.File.Stack.Name, stack.CloneServiceMap(doc.File.Services))
+
+	if onReady != nil {
+		hookCleanup, hookErr := onReady(runCtx)
+		if hookErr != nil {
+			return hookErr
+		}
+		readyCleanup = hookCleanup
+	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "All services reported ready.")
 
