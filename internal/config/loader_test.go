@@ -160,6 +160,67 @@ services:
 	}
 }
 
+func TestLoadPodmanRuntimeRequiresImage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    runtime: podman
+    health:
+      tcp:
+        address: localhost:1234
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "services.api.image") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadValidPodmanStack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack.yaml")
+	manifest := []byte(`version: 0.1
+stack:
+  name: demo
+services:
+  api:
+    image: ghcr.io/demo/api:latest
+    runtime: podman
+    health:
+      tcp:
+        address: localhost:1234
+`)
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	doc, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	svc := doc.Services["api"]
+	if svc == nil {
+		t.Fatalf("service api missing")
+	}
+	if got, want := svc.Runtime, "podman"; got != want {
+		t.Fatalf("runtime mismatch: got %q want %q", got, want)
+	}
+	if got, want := svc.Image, "ghcr.io/demo/api:latest"; got != want {
+		t.Fatalf("image mismatch: got %q want %q", got, want)
+	}
+}
+
 func TestLoadProcessRuntimeRequiresCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stack.yaml")

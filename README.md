@@ -149,7 +149,7 @@ Key behaviors:
 
 - `dependsOn.require` controls whether Orco waits for dependencies to start, exist, or reach readiness.
 - Probes support HTTP, TCP, command, and log checks, and an optional `expression` enables simple `OR` combinations.
-- `runtime` can be either `docker` or `process`, enabling mixed workloads.
+- `runtime` can be `docker`, `podman`, or `process`, enabling mixed workloads.
 - `update.strategy: canary` rolls updates out to a single replica and waits for `orco promote <service>` (or `update.promoteAfter`) before continuing.
 
 ## Engine design
