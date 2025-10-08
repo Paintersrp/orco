@@ -17,89 +17,125 @@ func validatePortCollisions(s *Stack) error {
 	if len(s.Services) == 0 {
 		return nil
 	}
-	claimed := map[string]*portClaim{}
+	claimed := map[int]map[string]*portClaim{}
 	for serviceName, svc := range s.Services {
 		if svc == nil {
 			continue
 		}
-		for idx, spec := range svc.Ports {
-			mappings, err := nat.ParsePortSpec(spec)
-			if err != nil {
-				return fmt.Errorf("%s: invalid port mapping %q: %w", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), spec, err)
+		if err := claimServicePorts(serviceName, svc, claimed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func claimServicePorts(serviceName string, svc *ServiceSpec, claimed map[int]map[string]*portClaim) error {
+	for idx, spec := range svc.Ports {
+		mappings, err := nat.ParsePortSpec(spec)
+		if err != nil {
+			return fmt.Errorf("%s: invalid port mapping %q: %w", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), spec, err)
+		}
+		for _, mapping := range mappings {
+			hostPortSpec := strings.TrimSpace(mapping.Binding.HostPort)
+			if hostPortSpec == "" {
+				continue
 			}
-			for _, mapping := range mappings {
-				hostPortSpec := strings.TrimSpace(mapping.Binding.HostPort)
-				if hostPortSpec == "" {
-					continue
-				}
-				hostIP := normalizeHostIP(mapping.Binding.HostIP)
-				start, end, err := nat.ParsePortRange(hostPortSpec)
-				if err != nil {
-					return fmt.Errorf("%s: invalid host port %q", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), hostPortSpec)
-				}
-				startPort := int(start)
-				endPort := int(end)
-				for port := startPort; port <= endPort; port++ {
-					specificKey := hostPortKey(hostIP, port)
-					wildcardKey := hostPortKey("0.0.0.0", port)
+			hostIP := normalizeHostIP(mapping.Binding.HostIP)
+			start, end, err := nat.ParsePortRange(hostPortSpec)
+			if err != nil {
+				return fmt.Errorf("%s: invalid host port %q", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), hostPortSpec)
+			}
+			startPort := int(start)
+			endPort := int(end)
+			for port := startPort; port <= endPort; port++ {
+				hostClaims := claimed[port]
 
-					var conflictServices map[string]struct{}
-					for _, key := range []string{specificKey, wildcardKey} {
-						if claim := claimed[key]; claim != nil {
-							if conflictServices == nil {
-								conflictServices = map[string]struct{}{}
-							}
-							for existing := range claim.services {
-								conflictServices[existing] = struct{}{}
-							}
-						}
+				conflictServices := collectConflictingServices(hostIP, hostClaims)
+				if len(conflictServices) > 0 {
+					services := make([]string, 0, len(conflictServices)+1)
+					for existing := range conflictServices {
+						services = append(services, existing)
 					}
-
-					if len(conflictServices) > 0 {
-						services := make([]string, 0, len(conflictServices)+1)
-						for existing := range conflictServices {
-							services = append(services, existing)
-						}
-						if _, seen := conflictServices[serviceName]; !seen {
-							services = append(services, serviceName)
-						}
-						sort.Strings(services)
-						next := nextAvailablePort(hostIP, port, claimed)
-						if next == 0 {
-							return fmt.Errorf("%s: host port %d on IP %q conflicts with service(s) %s; no additional host ports available", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), port, hostIP, strings.Join(services, ", "))
-						}
-						return fmt.Errorf("%s: host port %d on IP %q conflicts with service(s) %s; next available port is %d", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), port, hostIP, strings.Join(services, ", "), next)
+					if _, seen := conflictServices[serviceName]; !seen {
+						services = append(services, serviceName)
 					}
-
-					claim := claimed[specificKey]
-					if claim == nil {
-						claim = &portClaim{services: map[string]struct{}{}}
-						claimed[specificKey] = claim
+					sort.Strings(services)
+					next := nextAvailablePort(hostIP, port, claimed)
+					if next == 0 {
+						return fmt.Errorf("%s: host port %d on IP %q conflicts with service(s) %s; no additional host ports available", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), port, hostIP, strings.Join(services, ", "))
 					}
-					if hostIP == "0.0.0.0" {
-						claimed[wildcardKey] = claim
-					}
-					claim.services[serviceName] = struct{}{}
+					return fmt.Errorf("%s: host port %d on IP %q conflicts with service(s) %s; next available port is %d", serviceField(serviceName, fmt.Sprintf("ports[%d]", idx)), port, hostIP, strings.Join(services, ", "), next)
 				}
+
+				if hostClaims == nil {
+					hostClaims = map[string]*portClaim{}
+					claimed[port] = hostClaims
+				}
+				claim := hostClaims[hostIP]
+				if claim == nil {
+					claim = &portClaim{services: map[string]struct{}{}}
+					hostClaims[hostIP] = claim
+				}
+				claim.services[serviceName] = struct{}{}
 			}
 		}
 	}
 	return nil
 }
 
-func nextAvailablePort(hostIP string, start int, claimed map[string]*portClaim) int {
+func collectConflictingServices(hostIP string, hostClaims map[string]*portClaim) map[string]struct{} {
+	if len(hostClaims) == 0 {
+		return nil
+	}
+
+	conflictServices := map[string]struct{}{}
+
+	if hostIP == "0.0.0.0" {
+		for _, claim := range hostClaims {
+			for existing := range claim.services {
+				conflictServices[existing] = struct{}{}
+			}
+		}
+	} else {
+		if claim := hostClaims[hostIP]; claim != nil {
+			for existing := range claim.services {
+				conflictServices[existing] = struct{}{}
+			}
+		}
+		if claim := hostClaims["0.0.0.0"]; claim != nil {
+			for existing := range claim.services {
+				conflictServices[existing] = struct{}{}
+			}
+		}
+	}
+
+	if len(conflictServices) == 0 {
+		return nil
+	}
+	return conflictServices
+}
+
+func nextAvailablePort(hostIP string, start int, claimed map[int]map[string]*portClaim) int {
 	for candidate := start + 1; candidate <= 65535; candidate++ {
-		specific := claimed[hostPortKey(hostIP, candidate)]
-		wildcard := claimed[hostPortKey("0.0.0.0", candidate)]
+		hostClaims := claimed[candidate]
+		if hostIP == "0.0.0.0" {
+			if len(hostClaims) == 0 {
+				return candidate
+			}
+			continue
+		}
+
+		if len(hostClaims) == 0 {
+			return candidate
+		}
+
+		specific := hostClaims[hostIP]
+		wildcard := hostClaims["0.0.0.0"]
 		if (specific == nil || len(specific.services) == 0) && (wildcard == nil || len(wildcard.services) == 0) {
 			return candidate
 		}
 	}
 	return 0
-}
-
-func hostPortKey(hostIP string, port int) string {
-	return fmt.Sprintf("%s:%d", hostIP, port)
 }
 
 func normalizeHostIP(ip string) string {

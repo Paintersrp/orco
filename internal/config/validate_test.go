@@ -8,19 +8,19 @@ import (
 	"testing"
 )
 
-func TestValidatePortCollisions(t *testing.T) {
-	mkService := func(ports ...string) *ServiceSpec {
-		return &ServiceSpec{
-			Runtime:  "docker",
-			Image:    "ghcr.io/demo/app:latest",
-			Replicas: 1,
-			Ports:    ports,
-			Health: &ProbeSpec{
-				HTTP: &HTTPProbeSpec{URL: "http://localhost:8080/healthz"},
-			},
-		}
+func testServiceSpec(ports ...string) *ServiceSpec {
+	return &ServiceSpec{
+		Runtime:  "docker",
+		Image:    "ghcr.io/demo/app:latest",
+		Replicas: 1,
+		Ports:    ports,
+		Health: &ProbeSpec{
+			HTTP: &HTTPProbeSpec{URL: "http://localhost:8080/healthz"},
+		},
 	}
+}
 
+func TestValidatePortCollisions(t *testing.T) {
 	cases := []struct {
 		name     string
 		services map[string]*ServiceSpec
@@ -29,8 +29,8 @@ func TestValidatePortCollisions(t *testing.T) {
 		{
 			name: "conflict on wildcard interface",
 			services: map[string]*ServiceSpec{
-				"api":    mkService("8080:80"),
-				"worker": mkService("8080:80"),
+				"api":    testServiceSpec("8080:80"),
+				"worker": testServiceSpec("8080:80"),
 			},
 			contains: []string{
 				"host port 8080",
@@ -42,8 +42,8 @@ func TestValidatePortCollisions(t *testing.T) {
 		{
 			name: "wildcard conflicts with explicit ip",
 			services: map[string]*ServiceSpec{
-				"web": mkService("8080:80"),
-				"api": mkService("127.0.0.1:8080:80"),
+				"web": testServiceSpec("8080:80"),
+				"api": testServiceSpec("127.0.0.1:8080:80"),
 			},
 			contains: []string{
 				"host port 8080",
@@ -55,8 +55,8 @@ func TestValidatePortCollisions(t *testing.T) {
 		{
 			name: "conflict on explicit ip with occupied successor",
 			services: map[string]*ServiceSpec{
-				"db": mkService("127.0.0.1:8080:80", "127.0.0.1:8081:81"),
-				"ui": mkService("127.0.0.1:8080:80"),
+				"db": testServiceSpec("127.0.0.1:8080:80", "127.0.0.1:8081:81"),
+				"ui": testServiceSpec("127.0.0.1:8080:80"),
 			},
 			contains: []string{
 				"host port 8080",
@@ -85,6 +85,47 @@ func TestValidatePortCollisions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWildcardPortConflictsRegardlessOfOrder(t *testing.T) {
+	wildcard := testServiceSpec("0.0.0.0:8080:80")
+	specific := testServiceSpec("127.0.0.1:8080:80")
+
+	t.Run("specific before wildcard", func(t *testing.T) {
+		claimed := map[int]map[string]*portClaim{}
+		if err := claimServicePorts("specific", specific, claimed); err != nil {
+			t.Fatalf("claim specific service: %v", err)
+		}
+
+		err := claimServicePorts("wildcard", wildcard, claimed)
+		if err == nil {
+			t.Fatalf("expected wildcard claim to fail, got nil")
+		}
+
+		for _, want := range []string{"host port 8080", "IP \"0.0.0.0\"", "service(s) specific, wildcard"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected error to contain %q, got %v", want, err)
+			}
+		}
+	})
+
+	t.Run("wildcard before specific", func(t *testing.T) {
+		claimed := map[int]map[string]*portClaim{}
+		if err := claimServicePorts("wildcard", wildcard, claimed); err != nil {
+			t.Fatalf("claim wildcard service: %v", err)
+		}
+
+		err := claimServicePorts("specific", specific, claimed)
+		if err == nil {
+			t.Fatalf("expected specific claim to fail, got nil")
+		}
+
+		for _, want := range []string{"host port 8080", "IP \"127.0.0.1\"", "service(s) specific, wildcard"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected error to contain %q, got %v", want, err)
+			}
+		}
+	})
 }
 
 func TestLoadWarnsOnSharedWritableVolumes(t *testing.T) {
