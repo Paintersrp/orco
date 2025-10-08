@@ -243,8 +243,11 @@ func (s *Stack) ApplyDefaults() error {
 		if svc.Replicas == 0 {
 			svc.Replicas = 1
 		}
+		svc.Runtime = strings.TrimSpace(svc.Runtime)
 		if svc.Runtime == "" {
 			svc.Runtime = "docker"
+		} else {
+			svc.Runtime = strings.ToLower(svc.Runtime)
 		}
 		if svc.RestartPolicy == nil && s.Defaults.Restart != nil {
 			svc.RestartPolicy = s.Defaults.Restart.Clone()
@@ -336,10 +339,10 @@ func (s *Stack) Validate() error {
 		if svc.Runtime == "" {
 			return fmt.Errorf("%s: is required", serviceField(name, "runtime"))
 		}
-		if svc.Runtime != "docker" && svc.Runtime != "process" {
-			return fmt.Errorf("%s: unsupported runtime %q (supported values: docker, process)", serviceField(name, "runtime"), svc.Runtime)
+		if svc.Runtime != "docker" && svc.Runtime != "podman" && svc.Runtime != "process" {
+			return fmt.Errorf("%s: unsupported runtime %q (supported values: docker, podman, process)", serviceField(name, "runtime"), svc.Runtime)
 		}
-		if svc.Runtime == "docker" {
+		if svc.Runtime == "docker" || svc.Runtime == "podman" {
 			if strings.TrimSpace(svc.Image) == "" {
 				return fmt.Errorf("%s: is required", serviceField(name, "image"))
 			}
