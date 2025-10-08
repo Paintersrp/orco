@@ -1,0 +1,45 @@
+version: 0.1
+
+stack:
+  name: proxy-demo
+  workdir: ./
+
+proxy:
+  assets:
+    directory: ./web/dist
+    index: index.html
+  routes:
+    - pathPrefix: /api/
+      service: api
+      port: 8080
+      stripPathPrefix: true
+    - headers:
+        X-Debug: "1"
+      service: api
+      port: 8081
+      stripPathPrefix: false
+
+services:
+  api:
+    image: ghcr.io/acme/api:latest
+    runtime: docker
+    ports: ["8080:8080", "8081:8081"]
+    env:
+      LOG_LEVEL: info
+    health:
+      http:
+        url: http://localhost:8080/health
+        expectStatus: [200]
+
+  frontend:
+    runtime: process
+    command: ["./bin/frontend", "--port=3000"]
+    dependsOn:
+      - target: api
+        require: ready
+    env:
+      API_BASE_URL: http://localhost:8080
+    health:
+      http:
+        url: http://localhost:3000/healthz
+        expectStatus: [200]

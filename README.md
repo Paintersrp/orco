@@ -123,6 +123,28 @@ services:
     replicas: 1
 ```
 
+### HTTP proxy configuration
+
+Stacks may optionally define an HTTP edge proxy to expose multiple services behind a single listener. The proxy supports matching on request path prefixes and exact header values, with optional static asset serving for compiled front-end bundles:
+
+```yaml
+proxy:
+  assets:
+    directory: ./web/dist
+    index: index.html
+  routes:
+    - pathPrefix: /api/
+      service: api
+      port: 8080
+      stripPathPrefix: true
+    - headers:
+        X-Debug: "1"
+      service: api
+      port: 8081
+```
+
+Each route forwards traffic to the named service on the specified container port. A route must define either `pathPrefix` or one or more header matches (or both). When `stripPathPrefix` is true, the matched prefix is removed before proxying the request. Static assets are resolved relative to the stack's working directory, making them easy to embed alongside application code. The full configuration is demonstrated in `examples/proxy-stack.yaml`.
+
 Key behaviors:
 
 - `dependsOn.require` controls whether Orco waits for dependencies to start, exist, or reach readiness.

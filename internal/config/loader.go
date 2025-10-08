@@ -43,6 +43,44 @@ func Load(path string) (*Stack, error) {
 		}
 	}
 
+	if doc.Proxy != nil {
+		for _, route := range doc.Proxy.Routes {
+			if route == nil {
+				continue
+			}
+			route.PathPrefix = os.ExpandEnv(route.PathPrefix)
+			if len(route.Headers) > 0 {
+				expanded := make(map[string]string, len(route.Headers))
+				for k, v := range route.Headers {
+					expanded[k] = os.ExpandEnv(v)
+				}
+				route.Headers = expanded
+			}
+		}
+		if doc.Proxy.Assets != nil {
+			doc.Proxy.Assets.Directory = os.ExpandEnv(doc.Proxy.Assets.Directory)
+			if doc.Proxy.Assets.Directory != "" {
+				if !filepath.IsAbs(doc.Proxy.Assets.Directory) {
+					doc.Proxy.Assets.Directory = filepath.Clean(filepath.Join(resolvedWorkdir, doc.Proxy.Assets.Directory))
+				} else {
+					doc.Proxy.Assets.Directory = filepath.Clean(doc.Proxy.Assets.Directory)
+				}
+			}
+			doc.Proxy.Assets.Index = os.ExpandEnv(doc.Proxy.Assets.Index)
+			if doc.Proxy.Assets.Index != "" {
+				if !filepath.IsAbs(doc.Proxy.Assets.Index) {
+					base := doc.Proxy.Assets.Directory
+					if base == "" {
+						base = resolvedWorkdir
+					}
+					doc.Proxy.Assets.Index = filepath.Clean(filepath.Join(base, doc.Proxy.Assets.Index))
+				} else {
+					doc.Proxy.Assets.Index = filepath.Clean(doc.Proxy.Assets.Index)
+				}
+			}
+		}
+	}
+
 	for name, svc := range doc.Services {
 		if svc == nil {
 			continue
