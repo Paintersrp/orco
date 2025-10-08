@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -81,5 +84,55 @@ func TestValidatePortCollisions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLoadWarnsOnSharedWritableVolumes(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	stackPath := filepath.Join(dir, "stack.yaml")
+	manifest := fmt.Sprintf(`
+version: "0.1"
+stack:
+  name: demo
+services:
+  api:
+    runtime: docker
+    image: ghcr.io/example/api:latest
+    health:
+      http:
+        url: http://localhost:8080/healthz
+    volumes:
+      - %s:/var/lib/api
+  worker:
+    runtime: docker
+    image: ghcr.io/example/worker:latest
+    health:
+      http:
+        url: http://localhost:8081/healthz
+    volumes:
+      - %s:/var/lib/worker
+`, dataDir, dataDir)
+	if err := os.WriteFile(stackPath, []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write stack: %v", err)
+	}
+
+	stack, err := Load(stackPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if len(stack.Warnings) == 0 {
+		t.Fatalf("expected warnings, got none")
+	}
+	warning := stack.Warnings[0]
+	for _, want := range []string{"api", "worker", dataDir} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("warning %q missing %q", warning, want)
+		}
 	}
 }
