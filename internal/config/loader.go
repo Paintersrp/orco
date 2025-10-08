@@ -39,11 +39,11 @@ func Load(path string) (*Stack, error) {
 	doc.Includes = includes
 
 	stackDir := filepath.Dir(absPath)
-	resolvedWorkdir := resolveWorkdir(stackDir, os.ExpandEnv(doc.Stack.Workdir))
+	resolvedWorkdir := resolveWorkdir(stackDir, expandEnvWithDefault(doc.Stack.Workdir))
 	doc.Stack.Workdir = resolvedWorkdir
 
 	if doc.Logging != nil {
-		doc.Logging.Directory = os.ExpandEnv(doc.Logging.Directory)
+		doc.Logging.Directory = expandEnvWithDefault(doc.Logging.Directory)
 		if doc.Logging.Directory != "" && !filepath.IsAbs(doc.Logging.Directory) {
 			doc.Logging.Directory = filepath.Clean(filepath.Join(resolvedWorkdir, doc.Logging.Directory))
 		}
@@ -54,17 +54,17 @@ func Load(path string) (*Stack, error) {
 			if route == nil {
 				continue
 			}
-			route.PathPrefix = os.ExpandEnv(route.PathPrefix)
+			route.PathPrefix = expandEnvWithDefault(route.PathPrefix)
 			if len(route.Headers) > 0 {
 				expanded := make(map[string]string, len(route.Headers))
 				for k, v := range route.Headers {
-					expanded[k] = os.ExpandEnv(v)
+					expanded[k] = expandEnvWithDefault(v)
 				}
 				route.Headers = expanded
 			}
 		}
 		if doc.Proxy.Assets != nil {
-			doc.Proxy.Assets.Directory = os.ExpandEnv(doc.Proxy.Assets.Directory)
+			doc.Proxy.Assets.Directory = expandEnvWithDefault(doc.Proxy.Assets.Directory)
 			if doc.Proxy.Assets.Directory != "" {
 				if !filepath.IsAbs(doc.Proxy.Assets.Directory) {
 					doc.Proxy.Assets.Directory = filepath.Clean(filepath.Join(resolvedWorkdir, doc.Proxy.Assets.Directory))
@@ -72,7 +72,7 @@ func Load(path string) (*Stack, error) {
 					doc.Proxy.Assets.Directory = filepath.Clean(doc.Proxy.Assets.Directory)
 				}
 			}
-			doc.Proxy.Assets.Index = os.ExpandEnv(doc.Proxy.Assets.Index)
+			doc.Proxy.Assets.Index = expandEnvWithDefault(doc.Proxy.Assets.Index)
 			if doc.Proxy.Assets.Index != "" {
 				if !filepath.IsAbs(doc.Proxy.Assets.Index) {
 					base := doc.Proxy.Assets.Directory
@@ -97,13 +97,13 @@ func Load(path string) (*Stack, error) {
 		if len(svc.Env) > 0 {
 			inlineEnv = make(map[string]string, len(svc.Env))
 			for k, v := range svc.Env {
-				inlineEnv[k] = os.ExpandEnv(v)
+				inlineEnv[k] = expandEnvWithDefault(v)
 			}
 		}
 
 		var fileEnv map[string]string
 		if svc.EnvFromFile != "" {
-			expanded := os.ExpandEnv(svc.EnvFromFile)
+			expanded := expandEnvWithDefault(svc.EnvFromFile)
 			if !filepath.IsAbs(expanded) {
 				expanded = filepath.Clean(filepath.Join(resolvedWorkdir, expanded))
 			}
@@ -140,7 +140,7 @@ func Load(path string) (*Stack, error) {
 		if len(svc.Volumes) > 0 {
 			resolved := make([]string, 0, len(svc.Volumes))
 			for i, volume := range svc.Volumes {
-				expanded := os.ExpandEnv(volume)
+				expanded := expandEnvWithDefault(volume)
 				host, container, mode, err := splitVolumeSpec(expanded)
 				if err != nil {
 					return nil, fmt.Errorf("%s: %w", serviceField(name, fmt.Sprintf("volumes[%d]", i)), err)
@@ -170,6 +170,37 @@ func Load(path string) (*Stack, error) {
 		return nil, fmt.Errorf("%s: %w", absPath, err)
 	}
 	return &doc, nil
+}
+
+func expandEnvWithDefault(value string) string {
+	return os.Expand(value, func(expr string) string {
+		name := expr
+		defaultValue := ""
+		hasDefault := false
+		if idx := strings.Index(name, ":-"); idx >= 0 {
+			name, defaultValue = name[:idx], name[idx+2:]
+			hasDefault = true
+		}
+		if name == "" {
+			if hasDefault {
+				return defaultValue
+			}
+			return ""
+		}
+		if val, ok := os.LookupEnv(name); ok {
+			if val != "" {
+				return val
+			}
+			if hasDefault {
+				return defaultValue
+			}
+			return val
+		}
+		if hasDefault {
+			return defaultValue
+		}
+		return ""
+	})
 }
 
 func resolveWorkdir(base, workdir string) string {
@@ -259,7 +290,7 @@ func loadEnvFile(path string) (map[string]string, error) {
 		} else if comment := strings.IndexRune(value, '#'); comment >= 0 {
 			value = strings.TrimSpace(value[:comment])
 		}
-		values[key] = os.ExpandEnv(value)
+		values[key] = expandEnvWithDefault(value)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("load env file %q: %w", path, err)
