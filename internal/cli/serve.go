@@ -8,11 +8,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	apihttp "github.com/Paintersrp/orco/internal/api/http"
 )
+
+var newAPIServer = apihttp.NewServer
 
 func newServeCmd(ctx *context) *cobra.Command {
 	var apiAddr string
@@ -41,7 +44,7 @@ func newServeCmd(ctx *context) *cobra.Command {
 					return errors.New("control API unavailable")
 				}
 				hook = func(runCtx stdcontext.Context) (func() error, error) {
-					server, err := apihttp.NewServer(apihttp.Config{Addr: addr, Controller: control})
+					server, err := newAPIServer(apihttp.Config{Addr: addr, Controller: control})
 					if err != nil {
 						return nil, err
 					}
@@ -50,6 +53,21 @@ func newServeCmd(ctx *context) *cobra.Command {
 					go func() {
 						errCh <- server.Run(serverCtx)
 					}()
+					readyTimer := time.NewTimer(200 * time.Millisecond)
+					defer readyTimer.Stop()
+					select {
+					case err := <-errCh:
+						cancel()
+						return nil, err
+					case <-readyTimer.C:
+					case <-runCtx.Done():
+						cancel()
+						err := <-errCh
+						if err != nil && !errors.Is(err, stdcontext.Canceled) && !errors.Is(err, http.ErrServerClosed) {
+							return nil, err
+						}
+						return nil, runCtx.Err()
+					}
 					fmt.Fprintf(cmd.OutOrStdout(), "Control API listening on %s\n", server.Addr())
 					return func() error {
 						cancel()
