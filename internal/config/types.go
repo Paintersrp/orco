@@ -46,6 +46,7 @@ func (d Duration) IsSet() bool {
 
 // Stack mirrors the stack.yaml document structure.
 type Stack struct {
+	Includes []string                `yaml:"includes"`
 	Version  string                  `yaml:"version"`
 	Stack    StackMeta               `yaml:"stack"`
 	Defaults Defaults                `yaml:"defaults"`

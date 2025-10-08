@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	pathpkg "path"
@@ -19,18 +20,23 @@ func Load(path string) (*Stack, error) {
 		return nil, fmt.Errorf("resolve stack path: %w", err)
 	}
 
-	f, err := os.Open(absPath)
+	mergedDoc, includes, err := resolveIncludes(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("open stack file: %w", err)
+		return nil, err
 	}
-	defer f.Close()
 
-	decoder := yaml.NewDecoder(f)
+	encoded, err := yaml.Marshal(mergedDoc)
+	if err != nil {
+		return nil, fmt.Errorf("%s: marshal merged configuration: %w", absPath, err)
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
 	decoder.KnownFields(true)
 	var doc Stack
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("%s: decode: %w", absPath, err)
 	}
+	doc.Includes = includes
 
 	stackDir := filepath.Dir(absPath)
 	resolvedWorkdir := resolveWorkdir(stackDir, os.ExpandEnv(doc.Stack.Workdir))
