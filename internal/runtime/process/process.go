@@ -24,6 +24,10 @@ func New() runtime.Runtime {
 	return &runtimeImpl{}
 }
 
+func init() {
+	runtime.Register("process", New)
+}
+
 func (r *runtimeImpl) Start(ctx context.Context, spec runtime.StartSpec) (runtime.Handle, error) {
 	if len(spec.Command) == 0 {
 		return nil, fmt.Errorf("process runtime for service %s requires a command", spec.Name)
