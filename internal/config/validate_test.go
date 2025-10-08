@@ -37,6 +37,19 @@ func TestValidatePortCollisions(t *testing.T) {
 			},
 		},
 		{
+			name: "wildcard conflicts with explicit ip",
+			services: map[string]*ServiceSpec{
+				"web": mkService("8080:80"),
+				"api": mkService("127.0.0.1:8080:80"),
+			},
+			contains: []string{
+				"host port 8080",
+				"IP \"127.0.0.1\"",
+				"service(s) api, web",
+				"next available port is 8081",
+			},
+		},
+		{
 			name: "conflict on explicit ip with occupied successor",
 			services: map[string]*ServiceSpec{
 				"db": mkService("127.0.0.1:8080:80", "127.0.0.1:8081:81"),
