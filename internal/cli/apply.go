@@ -4,11 +4,13 @@ import (
 	stdcontext "context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Paintersrp/orco/internal/api"
 	"github.com/Paintersrp/orco/internal/engine"
 	"github.com/Paintersrp/orco/internal/stack"
 )
@@ -18,47 +20,73 @@ func newApplyCmd(ctx *context) *cobra.Command {
 		Use:   "apply",
 		Short: "Reconcile stack changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			doc, err := ctx.loadStack()
-			if err != nil {
-				return err
-			}
-
-			dep, stackName := ctx.currentDeploymentInfo()
-			if dep == nil {
-				return errors.New("no active deployment to apply changes to")
-			}
-			if stackName != "" && stackName != doc.File.Stack.Name {
-				return fmt.Errorf("active deployment %s does not match stack %s", stackName, doc.File.Stack.Name)
-			}
-
-			oldSpec := ctx.currentDeploymentSpec()
-			if len(oldSpec) == 0 {
-				return errors.New("no stored stack specification for active deployment")
-			}
-
-			newSpec := stack.CloneServiceMap(doc.File.Services)
-			diffs, targets, unsupported := diffStackServices(oldSpec, newSpec)
-
-			diffOutput := formatServiceDiffs(diffs)
-			fmt.Fprintln(cmd.OutOrStdout(), diffOutput)
-			if len(diffs) == 0 {
-				return nil
-			}
-
-			if len(unsupported) > 0 {
-				return fmt.Errorf("apply does not support adding or removing services: %s", strings.Join(unsupported, ", "))
-			}
-
-			if err := applyUpdates(cmd, ctx, doc.File.Stack.Name, dep, oldSpec, newSpec, targets); err != nil {
-				return err
-			}
-			return nil
+			_, err := runApply(cmd.Context(), ctx, cmd.OutOrStdout())
+			return err
 		},
 	}
 	return cmd
 }
 
-func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *engine.Deployment, oldSpec, newSpec map[string]*stack.Service, services []string) error {
+func runApply(ctx stdcontext.Context, cliCtx *context, out io.Writer) (*api.ApplyResult, error) {
+	doc, err := cliCtx.loadStack()
+	if err != nil {
+		return nil, err
+	}
+
+	dep, stackName := cliCtx.currentDeploymentInfo()
+	if dep == nil {
+		return nil, fmt.Errorf("%w to apply changes to", api.ErrNoActiveDeployment)
+	}
+	if stackName != "" && stackName != doc.File.Stack.Name {
+		return nil, fmt.Errorf("%w: active deployment %s does not match stack %s", api.ErrStackMismatch, stackName, doc.File.Stack.Name)
+	}
+
+	oldSpec := cliCtx.currentDeploymentSpec()
+	if len(oldSpec) == 0 {
+		return nil, fmt.Errorf("%w for active deployment", api.ErrNoStoredStackSpec)
+	}
+
+	newSpec := stack.CloneServiceMap(doc.File.Services)
+	diffs, targets, unsupported := diffStackServices(oldSpec, newSpec)
+
+	diffOutput := formatServiceDiffs(diffs)
+	if out != nil {
+		fmt.Fprintln(out, diffOutput)
+	}
+
+	result := &api.ApplyResult{
+		Diff:    diffOutput,
+		Updated: append([]string(nil), targets...),
+		Stack:   doc.File.Stack.Name,
+	}
+
+	populateSnapshot := func() {
+		control := NewControlAPI(cliCtx)
+		if control == nil {
+			return
+		}
+		if status, err := control.Status(ctx); err == nil && status != nil {
+			result.Snapshot = status.Services
+		}
+	}
+
+	if len(diffs) == 0 {
+		populateSnapshot()
+		return result, nil
+	}
+
+	if len(unsupported) > 0 {
+		return nil, fmt.Errorf("%w: apply does not support adding or removing services (%s)", api.ErrUnsupportedChange, strings.Join(unsupported, ", "))
+	}
+
+	if err := applyUpdates(ctx, cliCtx, doc.File.Stack.Name, dep, oldSpec, newSpec, targets, out); err != nil {
+		return nil, err
+	}
+	populateSnapshot()
+	return result, nil
+}
+
+func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep *engine.Deployment, oldSpec, newSpec map[string]*stack.Service, services []string, out io.Writer) error {
 	tracker := cliCtx.statusTracker()
 	currentSpec := stack.CloneServiceMap(oldSpec)
 	updated := make([]string, 0, len(services))
@@ -67,7 +95,7 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *en
 		svcSpec := newSpec[name]
 		service, ok := dep.Service(name)
 		if !ok {
-			return fmt.Errorf("service %s is not currently running", name)
+			return fmt.Errorf("%w: service %s is not currently running", api.ErrServiceNotRunning, name)
 		}
 
 		replicas := service.Replicas()
@@ -75,7 +103,9 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *en
 			replicas = 1
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Updating %s (%d replicas)\n", name, replicas)
+		if out != nil {
+			fmt.Fprintf(out, "Updating %s (%d replicas)\n", name, replicas)
+		}
 		updated = append(updated, name)
 
 		strategy := "rolling"
@@ -87,16 +117,20 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *en
 		printCanaryPrompt := func(detail string) {
 			detail = strings.TrimSpace(detail)
 			if detail != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "Service %s canary ready (%s); run `orco promote %s` to continue rollout.\n", name, detail, name)
+				if out != nil {
+					fmt.Fprintf(out, "Service %s canary ready (%s); run `orco promote %s` to continue rollout.\n", name, detail, name)
+				}
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "Service %s canary ready; run `orco promote %s` to continue rollout.\n", name, name)
+				if out != nil {
+					fmt.Fprintf(out, "Service %s canary ready; run `orco promote %s` to continue rollout.\n", name, name)
+				}
 			}
 		}
 
 		updateStart := time.Now()
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- runServiceUpdate(cmd.Context(), service, svcSpec, autoPromote)
+			errCh <- runServiceUpdate(ctx, service, svcSpec, autoPromote)
 		}()
 
 		ticker := time.NewTicker(50 * time.Millisecond)
@@ -109,7 +143,7 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *en
 			case updateErr = <-errCh:
 				ticker.Stop()
 				if updateErr != nil {
-					rollbackErr := rollbackUpdates(cmd.Context(), dep, oldSpec, updated)
+					rollbackErr := rollbackUpdates(ctx, dep, oldSpec, updated)
 					cliCtx.setDeployment(dep, stackName, oldSpec)
 					if rollbackErr != nil {
 						return fmt.Errorf("update %s failed: %v (rollback error: %v)", name, updateErr, rollbackErr)
@@ -134,9 +168,9 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *en
 						}
 					}
 				}
-			case <-cmd.Context().Done():
+			case <-ctx.Done():
 				ticker.Stop()
-				return cmd.Context().Err()
+				return ctx.Err()
 			}
 		}
 
@@ -159,8 +193,8 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *en
 			deadline := time.Now().Add(5 * time.Second)
 			for status.ReadyReplicas < replicas && time.Now().Before(deadline) {
 				select {
-				case <-cmd.Context().Done():
-					return cmd.Context().Err()
+				case <-ctx.Done():
+					return ctx.Err()
 				case <-time.After(50 * time.Millisecond):
 				}
 				status = tracker.Snapshot()[name]
@@ -174,7 +208,9 @@ func applyUpdates(cmd *cobra.Command, cliCtx *context, stackName string, dep *en
 		if status.Ready {
 			state = "Ready"
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Service %s ready (%d/%d replicas, %s)\n", name, ready, replicas, state)
+		if out != nil {
+			fmt.Fprintf(out, "Service %s ready (%d/%d replicas, %s)\n", name, ready, replicas, state)
+		}
 	}
 
 	return nil

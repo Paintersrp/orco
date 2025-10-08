@@ -26,6 +26,26 @@ These commands currently validate the stack definition, construct the dependency
 
 The `examples/canary-stack.yaml` manifest demonstrates configuring a canary update strategy with optional automatic promotion.
 
+### Control API
+
+Orco ships with an optional HTTP control plane that exposes orchestrator status and lifecycle operations. The API is disabled by default and can be enabled either by exporting `ORCO_ENABLE_API=true` or by passing `--api` on the `serve` command. The API binds to `127.0.0.1:7663` unless an alternate address is provided.
+
+```
+ORCO_ENABLE_API=true ./orco serve
+# or explicitly select an address
+./orco serve --api 127.0.0.1:9000
+```
+
+When enabled, the following endpoints are available:
+
+| Method | Path                          | Description |
+| ------ | ----------------------------- | ----------- |
+| `GET`  | `/api/v1/status`              | Returns a JSON snapshot of the active stack, including per-service readiness, restart counts, replica health, resource hints, and the most recent probe/restart events. |
+| `POST` | `/api/v1/restart/{service}`   | Executes a rolling restart of the named service and waits for readiness before returning a summary payload. |
+| `POST` | `/api/v1/apply`               | Reconciles stack changes and responds with the computed diff plus the latest status snapshot. |
+
+All error responses use the structure `{ "code": string, "message": string, "details": object }` to support machine parsing of failure conditions.
+
 ## Problem statement
 
 Traditional tooling such as `docker-compose` is optimized for "bring up these services" but leaves orchestration concerns to operators. This leads to awkward limitations:
