@@ -49,7 +49,7 @@ services:
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"-f"})
+        cmd.SetArgs([]string{"-f", "--output", "json"})
 
 	cmdCtx, cancel := stdcontext.WithCancel(stdcontext.Background())
 	cmd.SetContext(cmdCtx)
