@@ -22,6 +22,9 @@ The repository now includes a Go implementation of the Orco CLI. To experiment w
    ./orco --file examples/demo-stack.yaml up
    ```
 
+   Refer to the [CLI reference](docs/cli.md) for machine-readable output
+   formats (`--output json`) and JSON schema details.
+
 These commands currently validate the stack definition, construct the dependency DAG, and display planning information while the execution engine is developed. Future work will add real runtimes, health gating, and supervisors on top of this foundation.
 
 The `examples/canary-stack.yaml` manifest demonstrates configuring a canary update strategy with optional automatic promotion.
