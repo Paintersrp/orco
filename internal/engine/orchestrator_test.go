@@ -1270,6 +1270,7 @@ func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
 	mu.Unlock()
 
 	phases := []string{}
+	messages := []string{}
 	promoted := false
 	for _, evt := range recordedCopy {
 		if evt.Service != "api" {
@@ -1278,6 +1279,7 @@ func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
 		switch evt.Type {
 		case EventTypeUpdatePhase:
 			phases = append(phases, evt.Reason)
+			messages = append(messages, evt.Message)
 		case EventTypePromoted:
 			promoted = true
 		case EventTypeAborted:
@@ -1297,6 +1299,20 @@ func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
 	for i, reason := range expectedPhases {
 		if phases[i] != reason {
 			t.Fatalf("expected phase %s at position %d, got %s", reason, i, phases[i])
+		}
+	}
+	expectedMessages := []string{
+		blueGreenPhaseMessage(BlueGreenPhaseProvisionGreen),
+		blueGreenPhaseMessage(BlueGreenPhaseVerify),
+		fmt.Sprintf("%s (switch=%s)", blueGreenPhaseMessage(BlueGreenPhaseCutover), stack.BlueGreenSwitchPorts),
+		blueGreenPhaseMessage(BlueGreenPhaseDecommission),
+	}
+	if len(messages) < len(expectedMessages) {
+		t.Fatalf("missing blue-green phase messages: got %v", messages)
+	}
+	for i, msg := range expectedMessages {
+		if messages[i] != msg {
+			t.Fatalf("expected phase message %q at position %d, got %q", msg, i, messages[i])
 		}
 	}
 	if !promoted {

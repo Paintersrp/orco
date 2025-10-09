@@ -290,7 +290,7 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 	blue := append([]*replicaHandle(nil), h.replicas...)
 	green := make([]*replicaHandle, len(blue))
 
-	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "provisioning green replica set", 0, ReasonBlueGreenProvision, nil)
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, blueGreenPhaseMessage(BlueGreenPhaseProvisionGreen), 0, ReasonBlueGreenProvision, nil)
 
 	for i, replica := range blue {
 		if replica == nil || replica.supervisor == nil {
@@ -301,7 +301,7 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 		sup.Start(ctx)
 	}
 
-	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "verifying green replicas", 0, ReasonBlueGreenVerify, nil)
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, blueGreenPhaseMessage(BlueGreenPhaseVerify), 0, ReasonBlueGreenVerify, nil)
 
 	for _, replica := range green {
 		if err := replica.awaitReady(ctx); err != nil {
@@ -323,7 +323,11 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 		}
 	}
 
-	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, fmt.Sprintf("performing cutover to green replica set (switch=%s)", switchMode), 0, ReasonBlueGreenCutover, nil)
+	cutoverMsg := blueGreenPhaseMessage(BlueGreenPhaseCutover)
+	if switchMode != "" {
+		cutoverMsg = fmt.Sprintf("%s (switch=%s)", cutoverMsg, switchMode)
+	}
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, cutoverMsg, 0, ReasonBlueGreenCutover, nil)
 
 	h.replicas = green
 	h.service = newSpec
@@ -376,7 +380,7 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 		}
 	}
 
-	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "decommissioning blue replica set", 0, ReasonBlueGreenDecommission, nil)
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, blueGreenPhaseMessage(BlueGreenPhaseDecommission), 0, ReasonBlueGreenDecommission, nil)
 	if err := h.stopReplicaSet(ctx, blue, drainTimeout); err != nil {
 		return err
 	}

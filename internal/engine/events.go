@@ -64,6 +64,39 @@ const (
 	ReasonBlueGreenRollback     = "bluegreen_rollback"
 )
 
+// BlueGreenPhase enumerates the major milestones emitted while executing a
+// blue/green update. These map directly onto the event messages surfaced via
+// EventTypeUpdatePhase notifications so that consumers can reason about the
+// progress of the update.
+type BlueGreenPhase string
+
+const (
+	// BlueGreenPhaseProvisionGreen indicates the controller is provisioning
+	// the duplicate (green) replica set.
+	BlueGreenPhaseProvisionGreen BlueGreenPhase = "ProvisionGreen"
+
+	// BlueGreenPhaseVerify signals that the controller is waiting for the
+	// newly provisioned replica set to become ready.
+	BlueGreenPhaseVerify BlueGreenPhase = "Verify"
+
+	// BlueGreenPhaseCutover denotes the point at which traffic is switched
+	// from the blue replica set to the green replica set.
+	BlueGreenPhaseCutover BlueGreenPhase = "Cutover"
+
+	// BlueGreenPhaseDecommission communicates that the old (blue) replica
+	// set is being shut down following a successful cutover.
+	BlueGreenPhaseDecommission BlueGreenPhase = "DecommissionBlue"
+)
+
+// blueGreenPhaseMessage normalises the event message attached to blue/green
+// phase notifications.
+func blueGreenPhaseMessage(phase BlueGreenPhase) string {
+	if phase == "" {
+		return ""
+	}
+	return string(phase)
+}
+
 func sendEvent(events chan<- Event, service string, replica int, t EventType, message string, attempt int, reason string, err error) {
 	if events == nil {
 		return
