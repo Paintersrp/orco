@@ -312,14 +312,18 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 		}
 	}
 
-	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "performing cutover to green replica set", 0, ReasonBlueGreenCutover, nil)
-
 	rollbackWindow := time.Duration(0)
 	drainTimeout := time.Duration(0)
+	switchMode := stack.BlueGreenSwitchPorts
 	if newSpec.Update != nil && newSpec.Update.BlueGreen != nil {
 		rollbackWindow = newSpec.Update.BlueGreen.RollbackWindow.Duration
 		drainTimeout = newSpec.Update.BlueGreen.DrainTimeout.Duration
+		if mode := strings.TrimSpace(newSpec.Update.BlueGreen.Switch); mode != "" {
+			switchMode = mode
+		}
 	}
+
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, fmt.Sprintf("performing cutover to green replica set (switch=%s)", switchMode), 0, ReasonBlueGreenCutover, nil)
 
 	h.replicas = green
 	h.service = newSpec

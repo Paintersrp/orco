@@ -24,3 +24,8 @@ type (
 	Backoff       = config.BackoffSpec
 	Resources     = config.Resources
 )
+
+const (
+	BlueGreenSwitchPorts      = config.BlueGreenSwitchPorts
+	BlueGreenSwitchProxyLabel = config.BlueGreenSwitchProxyLabel
+)
