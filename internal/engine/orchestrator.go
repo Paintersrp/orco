@@ -319,20 +319,76 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 
 	h.replicas = green
 	h.service = newSpec
+
+	var (
+		watchCtx    context.Context
+		watchCancel context.CancelFunc
+		failureCh   chan error
+	)
+
+	if rollbackWindow > 0 {
+		watchCtx, watchCancel = context.WithCancel(context.Background())
+		failureCh = make(chan error, 1)
+		var wg sync.WaitGroup
+		wg.Add(len(green))
+		for _, replica := range green {
+			rep := replica
+			go func() {
+				defer wg.Done()
+				if rep == nil {
+					return
+				}
+				err := rep.awaitFailure(watchCtx)
+				if err == nil {
+					return
+				}
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
+				select {
+				case failureCh <- err:
+				default:
+				}
+			}()
+		}
+		go func() {
+			wg.Wait()
+			close(failureCh)
+		}()
+	}
+
 	sendEvent(h.events, h.name, -1, EventTypePromoted, "blue-green cutover complete", 0, ReasonPromoted, nil)
 
 	if rollbackWindow > 0 {
-		rollbackTimer := time.NewTimer(rollbackWindow)
-		defer rollbackTimer.Stop()
+		timer := time.NewTimer(rollbackWindow)
+		defer timer.Stop()
+
+		var rollbackErr error
 		select {
-		case <-rollbackTimer.C:
+		case err, ok := <-failureCh:
+			if ok {
+				rollbackErr = err
+			}
+		case <-timer.C:
 		case <-ctx.Done():
+			rollbackErr = ctx.Err()
+		}
+
+		if watchCancel != nil {
+			watchCancel()
+		}
+		if failureCh != nil {
+			for range failureCh {
+			}
+		}
+
+		if rollbackErr != nil {
 			shutdownReplicaSet(ctx, green)
 			h.replicas = blue
 			if previous != nil {
 				h.service = previous
 			}
-			err := fmt.Errorf("service %s blue-green rollback triggered: %w", h.name, ctx.Err())
+			err := fmt.Errorf("service %s blue-green rollback triggered: %w", h.name, rollbackErr)
 			sendEvent(h.events, h.name, -1, EventTypeAborted, "blue-green rollback initiated", 0, ReasonBlueGreenRollback, err)
 			return err
 		}
@@ -426,6 +482,13 @@ func (r *replicaHandle) awaitReady(ctx context.Context) error {
 		r.readyErr = r.supervisor.AwaitReady(ctx)
 	})
 	return r.readyErr
+}
+
+func (r *replicaHandle) awaitFailure(ctx context.Context) error {
+	if r == nil || r.supervisor == nil {
+		return nil
+	}
+	return r.supervisor.AwaitFailure(ctx)
 }
 
 func (h *serviceHandle) abortUpdate(updated []*replicaHandle, previous *stack.Service, cause error) error {
