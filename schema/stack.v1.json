@@ -385,6 +385,9 @@
         },
         "promoteAfter": {
           "$ref": "#/$defs/duration"
+        },
+        "blueGreen": {
+          "$ref": "#/$defs/blueGreenStrategy"
         }
       }
     },
@@ -398,6 +401,22 @@
         },
         "backoff": {
           "$ref": "#/$defs/backoff"
+        }
+      }
+    },
+    "blueGreenStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "drainTimeout": {
+          "$ref": "#/$defs/duration"
+        },
+        "rollbackWindow": {
+          "$ref": "#/$defs/duration"
+        },
+        "switch": {
+          "type": "string",
+          "enum": ["ports", "proxyLabel"]
         }
       }
     },

@@ -200,6 +200,10 @@ HTTP, TCP, command, and log probes can be mixed per service. Each probe has conf
 
 Rolling updates update one replica at a time. Parameters such as `maxUnavailable` and `maxSurge` constrain concurrency, ensuring availability while updates proceed. Setting `update.strategy: canary` limits the rollout to a single replica until a promotion is triggered, enabling targeted validation before continuing.
 
+### Blue/green updates
+
+For services that require atomic cutovers, set `update.strategy: blueGreen`. The orchestrator provisions a full duplicate (green) replica set and drives four observable phases via `UpdatePhase` events: `ProvisionGreen`, `Verify`, `Cutover`, and `DecommissionBlue`. Traffic remains on the blue replica set until all green replicas report readiness, at which point a single cutover switches either host ports or proxy labels depending on `update.blueGreen.switch`. Optional `drainTimeout` and `rollbackWindow` values control how long to wait for old replicas to drain and how long to watch the green set for regressions, respectively. If verification fails, Orco tears down the green set, keeps blue replicas serving traffic, and emits a rollback reason. See `examples/bluegreen-stack.yaml` for a reference manifest.
+
 ### Canary rollouts
 
 When a canary rollout is in progress Orco restarts one replica, waits for it to become healthy, and emits a `Canary` event. You can then run `orco promote <service>` to continue the rollout, or declare `update.promoteAfter` to automatically promote after a soak period (for example `promoteAfter: 5m`). The `examples/canary-stack.yaml` manifest demonstrates a complete configuration.
