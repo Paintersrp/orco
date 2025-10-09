@@ -183,6 +183,10 @@ func (h *serviceHandle) awaitReady(ctx context.Context) error {
 	return nil
 }
 
+func (r *replicaHandle) awaitFailure(ctx context.Context) error {
+	return r.supervisor.AwaitFailure(ctx)
+}
+
 func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) (retErr error) {
 	if h == nil {
 		return fmt.Errorf("service handle is nil")
@@ -324,15 +328,45 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 	if rollbackWindow > 0 {
 		rollbackTimer := time.NewTimer(rollbackWindow)
 		defer rollbackTimer.Stop()
+
+		failureCtx, failureCancel := context.WithCancel(context.Background())
+		failureCh := make(chan error, 1)
+		var failureWG sync.WaitGroup
+		for _, replica := range green {
+			if replica == nil || replica.supervisor == nil {
+				continue
+			}
+			failureWG.Add(1)
+			go func(rep *replicaHandle) {
+				defer failureWG.Done()
+				if err := rep.awaitFailure(failureCtx); err != nil && !errors.Is(err, context.Canceled) {
+					select {
+					case failureCh <- err:
+					default:
+					}
+				}
+			}(replica)
+		}
+
+		var rollbackErr error
 		select {
 		case <-rollbackTimer.C:
 		case <-ctx.Done():
+			rollbackErr = ctx.Err()
+		case err := <-failureCh:
+			rollbackErr = err
+		}
+
+		failureCancel()
+		failureWG.Wait()
+
+		if rollbackErr != nil {
 			shutdownReplicaSet(ctx, green)
 			h.replicas = blue
 			if previous != nil {
 				h.service = previous
 			}
-			err := fmt.Errorf("service %s blue-green rollback triggered: %w", h.name, ctx.Err())
+			err := fmt.Errorf("service %s blue-green rollback triggered: %w", h.name, rollbackErr)
 			sendEvent(h.events, h.name, -1, EventTypeAborted, "blue-green rollback initiated", 0, ReasonBlueGreenRollback, err)
 			return err
 		}

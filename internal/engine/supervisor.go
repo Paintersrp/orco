@@ -54,6 +54,7 @@ type supervisor struct {
 	sleep  func(context.Context, time.Duration) error
 
 	restartCh chan *restartRequest
+	failureCh chan error
 
 	readyOnce sync.Once
 	readyCh   chan error
@@ -92,6 +93,7 @@ func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runt
 		startedCh: make(chan error, 1),
 		done:      make(chan struct{}),
 		restartCh: make(chan *restartRequest),
+		failureCh: make(chan error, 1),
 		proxy:     proxyClone,
 	}
 
@@ -419,6 +421,10 @@ func (s *supervisor) run() {
 			return
 		}
 
+		if ready && !(errors.Is(instErr, context.Canceled) && s.ctx.Err() != nil) {
+			s.notifyFailure(instErr)
+		}
+
 		if errors.Is(instErr, context.Canceled) && s.ctx.Err() != nil {
 			if pending != nil {
 				s.finishRestart(pending, s.ctx.Err())
@@ -456,6 +462,28 @@ func (s *supervisor) run() {
 				return
 			}
 		}
+	}
+}
+
+func (s *supervisor) notifyFailure(err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case s.failureCh <- err:
+	default:
+	}
+}
+
+func (s *supervisor) AwaitFailure(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-s.failureCh:
+		return err
 	}
 }
 

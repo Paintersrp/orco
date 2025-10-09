@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Paintersrp/orco/internal/probe"
 	runtimelib "github.com/Paintersrp/orco/internal/runtime"
 	"github.com/Paintersrp/orco/internal/stack"
 )
@@ -1473,6 +1474,213 @@ func TestServiceUpdateBlueGreenVerifyFailureRollsBack(t *testing.T) {
 	}
 	if blue0Stopped || blue1Stopped {
 		t.Fatalf("blue replicas stopped during rollback: %+v", recordedCopy)
+	}
+}
+
+func TestServiceUpdateBlueGreenRollbackOnGreenFailureDuringWindow(t *testing.T) {
+	blue0 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	blue1 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	green0 := &fakeInstance{waitCh: make(chan error, 1), healthCh: make(chan probe.State, 1), stopped: make(chan struct{}, 1)}
+	green1 := &fakeInstance{waitCh: make(chan error, 1), healthCh: make(chan probe.State, 1), stopped: make(chan struct{}, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {blue0, blue1, green0, green1},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 2,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 256)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected first replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected second replica start, got %s", name)
+	}
+
+	blue0.waitCh <- nil
+	blue1.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment returned")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 2,
+		Command:  []string{"sleep", "1"},
+		Update: &stack.UpdatePolicy{
+			Strategy: "blueGreen",
+			BlueGreen: &stack.BlueGreen{
+				DrainTimeout:   stack.Duration{Duration: 10 * time.Millisecond},
+				RollbackWindow: stack.Duration{Duration: 200 * time.Millisecond},
+				Switch:         "ports",
+			},
+		},
+	}
+
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[2]" {
+		t.Fatalf("expected first green replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[3]" {
+		t.Fatalf("expected second green replica start, got %s", name)
+	}
+
+	green0.waitCh <- nil
+	green1.waitCh <- nil
+
+	waitForEvent := func(match func(Event) bool) {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			for _, evt := range recorded {
+				if match(evt) {
+					mu.Unlock()
+					return
+				}
+			}
+			mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for event")
+	}
+
+	waitForEvent(func(evt Event) bool {
+		return evt.Service == "api" && evt.Type == EventTypePromoted && evt.Reason == ReasonPromoted
+	})
+
+	failureErr := errors.New("green replica unhealthy")
+	green0.healthCh <- probe.State{Status: probe.StatusUnready, Err: failureErr}
+
+	var updateErr error
+	select {
+	case updateErr = <-updateDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for blue-green rollback")
+	}
+
+	if updateErr == nil {
+		t.Fatalf("expected blue-green rollback error")
+	}
+	if !strings.Contains(updateErr.Error(), "blue-green rollback triggered") {
+		t.Fatalf("unexpected rollback error: %v", updateErr)
+	}
+
+	if service.Replicas() != 2 {
+		t.Fatalf("expected blue replicas to remain active, got %d", service.Replicas())
+	}
+
+	select {
+	case <-green0.stopped:
+	case <-time.After(time.Second):
+		t.Fatalf("expected green replica 0 to shut down during rollback")
+	}
+	select {
+	case <-green1.stopped:
+	case <-time.After(time.Second):
+		t.Fatalf("expected green replica 1 to shut down during rollback")
+	}
+
+	select {
+	case <-blue0.stopped:
+		t.Fatalf("blue replica 0 stopped unexpectedly during rollback")
+	default:
+	}
+	select {
+	case <-blue1.stopped:
+		t.Fatalf("blue replica 1 stopped unexpectedly during rollback")
+	default:
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	aborted := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" {
+			continue
+		}
+		if evt.Type == EventTypeAborted {
+			aborted = true
+			if evt.Reason != ReasonBlueGreenRollback {
+				t.Fatalf("unexpected rollback reason: %+v", evt)
+			}
+			if evt.Err == nil || !strings.Contains(evt.Err.Error(), "blue-green rollback triggered") {
+				t.Fatalf("rollback event missing context: %+v", evt)
+			}
+		}
+	}
+
+	if !aborted {
+		t.Fatalf("expected blue-green rollback event, got %+v", recordedCopy)
 	}
 }
 
