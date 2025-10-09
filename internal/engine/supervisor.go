@@ -63,6 +63,9 @@ type supervisor struct {
 	startedOnce sync.Once
 	startedCh   chan error
 
+	failureMu   sync.Mutex
+	failureSubs map[chan error]struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -83,16 +86,17 @@ func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runt
 		proxyClone = proxy.Clone()
 	}
 	sup := &supervisor{
-		name:      name,
-		replica:   replica,
-		runtime:   rt,
-		events:    events,
-		readyCh:   make(chan error, 1),
-		existsCh:  make(chan error, 1),
-		startedCh: make(chan error, 1),
-		done:      make(chan struct{}),
-		restartCh: make(chan *restartRequest),
-		proxy:     proxyClone,
+		name:        name,
+		replica:     replica,
+		runtime:     rt,
+		events:      events,
+		readyCh:     make(chan error, 1),
+		existsCh:    make(chan error, 1),
+		startedCh:   make(chan error, 1),
+		done:        make(chan struct{}),
+		restartCh:   make(chan *restartRequest),
+		failureSubs: make(map[chan error]struct{}),
+		proxy:       proxyClone,
 	}
 
 	sup.jitter = defaultJitter
@@ -417,6 +421,10 @@ func (s *supervisor) run() {
 			}
 			s.setRunErr(nil)
 			return
+		}
+
+		if ready {
+			s.notifyFailure(instErr)
 		}
 
 		if errors.Is(instErr, context.Canceled) && s.ctx.Err() != nil {
@@ -893,6 +901,56 @@ func (s *supervisor) AwaitReady(ctx context.Context) error {
 		return ctx.Err()
 	case err := <-s.readyCh:
 		return err
+	}
+}
+
+func (s *supervisor) AwaitFailure(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ch := s.subscribeFailure()
+	defer s.unsubscribeFailure(ch)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-ch:
+		return err
+	}
+}
+
+func (s *supervisor) subscribeFailure() chan error {
+	ch := make(chan error, 1)
+	s.failureMu.Lock()
+	s.failureSubs[ch] = struct{}{}
+	s.failureMu.Unlock()
+	return ch
+}
+
+func (s *supervisor) unsubscribeFailure(ch chan error) {
+	s.failureMu.Lock()
+	delete(s.failureSubs, ch)
+	s.failureMu.Unlock()
+}
+
+func (s *supervisor) notifyFailure(err error) {
+	if err == nil {
+		return
+	}
+	s.failureMu.Lock()
+	if len(s.failureSubs) == 0 {
+		s.failureMu.Unlock()
+		return
+	}
+	subs := make([]chan error, 0, len(s.failureSubs))
+	for ch := range s.failureSubs {
+		subs = append(subs, ch)
+	}
+	s.failureMu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- err:
+		default:
+		}
 	}
 }
 
