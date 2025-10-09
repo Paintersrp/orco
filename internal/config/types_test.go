@@ -172,6 +172,64 @@ func TestParseProbeExpressionErrors(t *testing.T) {
 	}
 }
 
+func TestStackValidateBlueGreenSwitchDefaultsToPorts(t *testing.T) {
+	stack := blueGreenTestStack("", t)
+	if err := stack.Validate(); err != nil {
+		t.Fatalf("stack.Validate returned error: %v", err)
+	}
+	svc := stack.Services["api"]
+	if svc == nil || svc.Update == nil || svc.Update.BlueGreen == nil {
+		t.Fatalf("expected blueGreen configuration to be present")
+	}
+	if svc.Update.BlueGreen.Switch != BlueGreenSwitchPorts {
+		t.Fatalf("unexpected switch value: got %q want %q", svc.Update.BlueGreen.Switch, BlueGreenSwitchPorts)
+	}
+}
+
+func TestStackValidateBlueGreenSwitchAllowsProxyLabel(t *testing.T) {
+	stack := blueGreenTestStack("Proxy-Label", t)
+	if err := stack.Validate(); err != nil {
+		t.Fatalf("stack.Validate returned error: %v", err)
+	}
+	svc := stack.Services["api"]
+	if svc.Update.BlueGreen.Switch != BlueGreenSwitchProxyLabel {
+		t.Fatalf("unexpected switch value: got %q want %q", svc.Update.BlueGreen.Switch, BlueGreenSwitchProxyLabel)
+	}
+}
+
+func TestStackValidateBlueGreenSwitchRejectsUnknownValue(t *testing.T) {
+	stack := blueGreenTestStack("invalid", t)
+	err := stack.Validate()
+	if err == nil || !strings.Contains(err.Error(), "unsupported value") {
+		t.Fatalf("expected unsupported value error, got %v", err)
+	}
+}
+
+func blueGreenTestStack(switchValue string, t *testing.T) *Stack {
+	t.Helper()
+	return &Stack{
+		Version: "0.1",
+		Stack:   StackMeta{Name: "demo"},
+		Services: map[string]*ServiceSpec{
+			"api": {
+				Runtime:  "docker",
+				Image:    "example/api:latest",
+				Replicas: 1,
+				Ports:    []string{"8080:8080"},
+				Health: &ProbeSpec{
+					HTTP: &HTTPProbeSpec{URL: "http://127.0.0.1:8080/health"},
+				},
+				Update: &UpdateStrategy{
+					Strategy: "blueGreen",
+					BlueGreen: &BlueGreenStrategy{
+						Switch: switchValue,
+					},
+				},
+			},
+		},
+	}
+}
+
 func TestProbeApplyDefaultsCopiesLogAndExpression(t *testing.T) {
 	defaults := &ProbeSpec{
 		Interval:   Duration{Duration: time.Second},

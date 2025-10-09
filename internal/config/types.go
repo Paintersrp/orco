@@ -231,6 +231,16 @@ type BlueGreenStrategy struct {
 	Switch         string   `yaml:"switch"`
 }
 
+const (
+	// BlueGreenSwitchPorts uses port-based switching where the green replica set
+	// binds distinct host ports until the cutover completes.
+	BlueGreenSwitchPorts = "ports"
+
+	// BlueGreenSwitchProxyLabel routes cutover traffic by updating proxy labels
+	// in the stack-level HTTP proxy configuration.
+	BlueGreenSwitchProxyLabel = "proxyLabel"
+)
+
 // RestartPolicy defines restart behaviour for a service.
 type RestartPolicy struct {
 	MaxRetries int          `yaml:"maxRetries"`
@@ -385,6 +395,16 @@ func (s *Stack) Validate() error {
 				}
 				if svc.Update.BlueGreen.RollbackWindow.IsSet() && svc.Update.BlueGreen.RollbackWindow.Duration < 0 {
 					return fmt.Errorf("%s: must be non-negative", serviceField(name, "update", "blueGreen", "rollbackWindow"))
+				}
+				switchValue := strings.TrimSpace(svc.Update.BlueGreen.Switch)
+				switchLower := strings.ToLower(strings.ReplaceAll(switchValue, "-", ""))
+				switch switchLower {
+				case "", BlueGreenSwitchPorts:
+					svc.Update.BlueGreen.Switch = BlueGreenSwitchPorts
+				case strings.ToLower(BlueGreenSwitchProxyLabel):
+					svc.Update.BlueGreen.Switch = BlueGreenSwitchProxyLabel
+				default:
+					return fmt.Errorf("%s: unsupported value %q (supported values: %s, %s)", serviceField(name, "update", "blueGreen", "switch"), svc.Update.BlueGreen.Switch, BlueGreenSwitchPorts, BlueGreenSwitchProxyLabel)
 				}
 			default:
 				return fmt.Errorf("%s: unsupported value %q (supported values: rolling, canary, blueGreen)", serviceField(name, "update", "strategy"), svc.Update.Strategy)
