@@ -69,6 +69,22 @@ func TestValidatePortCollisions(t *testing.T) {
 				"next available port is 8082",
 			},
 		},
+		{
+			name: "ipv6 wildcard conflicts with ipv4 loopback",
+			services: map[string]*ServiceSpec{
+				"dual":     testServiceSpec("[::]:8080:80"),
+				"loopback": testServiceSpec("127.0.0.1:8080:80"),
+			},
+			contains: []string{
+				"host port 8080",
+				"service(s) dual, loopback",
+				"next available port is 8081",
+			},
+			containsOneOf: []string{
+				"IP \"127.0.0.1\"",
+				"IP \"0.0.0.0\"",
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -178,6 +194,28 @@ func TestNextAvailablePortConsidersProtocols(t *testing.T) {
 
 	if got := nextAvailablePort("0.0.0.0", "tcp", 8079, claimed); got != 8081 {
 		t.Fatalf("expected wildcard TCP to skip to 8081, got %d", got)
+	}
+}
+
+func TestNextAvailablePortSkipsIPv6WildcardClaims(t *testing.T) {
+	claimed := map[int]map[string]map[string]*portClaim{
+		8080: {
+			"::": {
+				"tcp": &portClaim{services: map[string]struct{}{"dual": {}}},
+			},
+		},
+	}
+
+	if got := nextAvailablePort("0.0.0.0", "tcp", 8079, claimed); got != 8081 {
+		t.Fatalf("expected wildcard TCP to skip to 8081 due to IPv6 wildcard, got %d", got)
+	}
+
+	if got := nextAvailablePort("127.0.0.1", "tcp", 8079, claimed); got != 8081 {
+		t.Fatalf("expected specific TCP to skip to 8081 due to IPv6 wildcard, got %d", got)
+	}
+
+	if got := nextAvailablePort("0.0.0.0", "udp", 8079, claimed); got != 8080 {
+		t.Fatalf("expected wildcard UDP to reuse 8080 despite IPv6 wildcard TCP, got %d", got)
 	}
 }
 

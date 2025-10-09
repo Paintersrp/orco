@@ -9,6 +9,11 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
+const (
+	hostWildcardSentinel = "0.0.0.0"
+	ipv6Wildcard         = "::"
+)
+
 type portClaim struct {
 	services map[string]struct{}
 }
@@ -107,7 +112,7 @@ func collectConflictingServices(hostIP, protocol string, hostClaims map[string]m
 		}
 	}
 
-	if hostIP == "0.0.0.0" {
+	if isWildcardHostIP(hostIP) {
 		for _, claims := range hostClaims {
 			addConflicts(claims)
 		}
@@ -115,8 +120,10 @@ func collectConflictingServices(hostIP, protocol string, hostClaims map[string]m
 		if claims := hostClaims[hostIP]; claims != nil {
 			addConflicts(claims)
 		}
-		if claims := hostClaims["0.0.0.0"]; claims != nil {
-			addConflicts(claims)
+		for _, wildcard := range wildcardHostIPs() {
+			if claims := hostClaims[wildcard]; claims != nil {
+				addConflicts(claims)
+			}
 		}
 	}
 
@@ -129,7 +136,7 @@ func collectConflictingServices(hostIP, protocol string, hostClaims map[string]m
 func nextAvailablePort(hostIP, protocol string, start int, claimed map[int]map[string]map[string]*portClaim) int {
 	for candidate := start + 1; candidate <= 65535; candidate++ {
 		hostClaims := claimed[candidate]
-		if hostIP == "0.0.0.0" {
+		if isWildcardHostIP(hostIP) {
 			if len(hostClaims) == 0 {
 				return candidate
 			}
@@ -152,9 +159,17 @@ func nextAvailablePort(hostIP, protocol string, start int, claimed map[int]map[s
 		}
 
 		specific := hostClaims[hostIP]
-		wildcard := hostClaims["0.0.0.0"]
 		specificFree := specific == nil || specific[protocol] == nil || len(specific[protocol].services) == 0
-		wildcardFree := wildcard == nil || wildcard[protocol] == nil || len(wildcard[protocol].services) == 0
+
+		wildcardFree := true
+		for _, wildcard := range wildcardHostIPs() {
+			claims := hostClaims[wildcard]
+			if claims != nil && claims[protocol] != nil && len(claims[protocol].services) > 0 {
+				wildcardFree = false
+				break
+			}
+		}
+
 		if specificFree && wildcardFree {
 			return candidate
 		}
@@ -164,10 +179,18 @@ func nextAvailablePort(hostIP, protocol string, start int, claimed map[int]map[s
 
 func normalizeHostIP(ip string) string {
 	ip = strings.TrimSpace(ip)
-	if ip == "" || ip == "0.0.0.0" {
-		return "0.0.0.0"
+	if ip == "" || ip == hostWildcardSentinel || ip == ipv6Wildcard {
+		return hostWildcardSentinel
 	}
 	return ip
+}
+
+func isWildcardHostIP(ip string) bool {
+	return ip == hostWildcardSentinel || ip == ipv6Wildcard
+}
+
+func wildcardHostIPs() []string {
+	return []string{hostWildcardSentinel, ipv6Wildcard}
 }
 
 func collectVolumeConflicts(s *Stack) []string {
