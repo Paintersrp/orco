@@ -4,6 +4,7 @@ import (
 	stdcontext "context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -35,10 +36,10 @@ func restartService(ctx stdcontext.Context, cliCtx *context, svcName string, out
 		return nil, fmt.Errorf("%w %s", api.ErrUnknownService, svcName)
 	}
 	strategy := "rolling"
-	if svc.Update != nil && svc.Update.Strategy != "" {
-		strategy = svc.Update.Strategy
+	if svc.Update != nil && strings.TrimSpace(svc.Update.Strategy) != "" {
+		strategy = strings.ToLower(strings.TrimSpace(svc.Update.Strategy))
 	}
-	if strategy != "rolling" && strategy != "canary" {
+	if strategy != "rolling" && strategy != "canary" && strategy != "bluegreen" {
 		return nil, fmt.Errorf("%w: unsupported update strategy %q for service %s", api.ErrUnsupportedChange, strategy, svcName)
 	}
 

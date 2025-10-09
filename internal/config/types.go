@@ -217,10 +217,18 @@ type LogProbeSpec struct {
 
 // UpdateStrategy controls rolling update behaviour.
 type UpdateStrategy struct {
-	Strategy       string   `yaml:"strategy"`
-	MaxUnavailable int      `yaml:"maxUnavailable"`
-	MaxSurge       int      `yaml:"maxSurge"`
-	PromoteAfter   Duration `yaml:"promoteAfter"`
+	Strategy       string             `yaml:"strategy"`
+	MaxUnavailable int                `yaml:"maxUnavailable"`
+	MaxSurge       int                `yaml:"maxSurge"`
+	PromoteAfter   Duration           `yaml:"promoteAfter"`
+	BlueGreen      *BlueGreenStrategy `yaml:"blueGreen"`
+}
+
+// BlueGreenStrategy captures configuration specific to the blue/green update strategy.
+type BlueGreenStrategy struct {
+	DrainTimeout   Duration `yaml:"drainTimeout"`
+	RollbackWindow Duration `yaml:"rollbackWindow"`
+	Switch         string   `yaml:"switch"`
 }
 
 // RestartPolicy defines restart behaviour for a service.
@@ -363,6 +371,24 @@ func (s *Stack) Validate() error {
 		}
 		if svc.Replicas < 1 {
 			return fmt.Errorf("%s: must be at least 1", serviceField(name, "replicas"))
+		}
+		if svc.Update != nil {
+			strategy := strings.TrimSpace(strings.ToLower(svc.Update.Strategy))
+			switch strategy {
+			case "", "rolling", "canary":
+			case "bluegreen":
+				if svc.Update.BlueGreen == nil {
+					svc.Update.BlueGreen = &BlueGreenStrategy{}
+				}
+				if svc.Update.BlueGreen.DrainTimeout.IsSet() && svc.Update.BlueGreen.DrainTimeout.Duration < 0 {
+					return fmt.Errorf("%s: must be non-negative", serviceField(name, "update", "blueGreen", "drainTimeout"))
+				}
+				if svc.Update.BlueGreen.RollbackWindow.IsSet() && svc.Update.BlueGreen.RollbackWindow.Duration < 0 {
+					return fmt.Errorf("%s: must be non-negative", serviceField(name, "update", "blueGreen", "rollbackWindow"))
+				}
+			default:
+				return fmt.Errorf("%s: unsupported value %q (supported values: rolling, canary, blueGreen)", serviceField(name, "update", "strategy"), svc.Update.Strategy)
+			}
 		}
 		if svc.RestartPolicy != nil && svc.RestartPolicy.Backoff != nil {
 			if svc.RestartPolicy.Backoff.Factor == 0 {
@@ -612,6 +638,13 @@ func (s *ServiceSpec) Clone() *ServiceSpec {
 			MaxUnavailable: s.Update.MaxUnavailable,
 			MaxSurge:       s.Update.MaxSurge,
 			PromoteAfter:   s.Update.PromoteAfter,
+		}
+		if s.Update.BlueGreen != nil {
+			cp.Update.BlueGreen = &BlueGreenStrategy{
+				DrainTimeout:   s.Update.BlueGreen.DrainTimeout,
+				RollbackWindow: s.Update.BlueGreen.RollbackWindow,
+				Switch:         s.Update.BlueGreen.Switch,
+			}
 		}
 	}
 	if s.RestartPolicy != nil {

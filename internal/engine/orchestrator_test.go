@@ -1121,6 +1121,361 @@ func TestServiceUpdateCanaryFailureAborts(t *testing.T) {
 	}
 }
 
+func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
+	blue0 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	blue1 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	green0 := &fakeInstance{waitCh: make(chan error, 1)}
+	green1 := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {blue0, blue1, green0, green1},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 2,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 256)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected first replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected second replica start, got %s", name)
+	}
+
+	blue0.waitCh <- nil
+	blue1.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment returned")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 2,
+		Command:  []string{"sleep", "1"},
+		Update: &stack.UpdatePolicy{
+			Strategy: "blueGreen",
+			BlueGreen: &stack.BlueGreen{
+				DrainTimeout:   stack.Duration{Duration: 10 * time.Millisecond},
+				RollbackWindow: stack.Duration{Duration: 25 * time.Millisecond},
+				Switch:         "ports",
+			},
+		},
+	}
+
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[2]" {
+		t.Fatalf("expected first green replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[3]" {
+		t.Fatalf("expected second green replica start, got %s", name)
+	}
+
+	green0.waitCh <- nil
+	green1.waitCh <- nil
+
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatalf("blue-green update failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for blue-green update to complete")
+	}
+
+	select {
+	case <-blue0.stopped:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("expected blue replica 0 to decommission")
+	}
+	select {
+	case <-blue1.stopped:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("expected blue replica 1 to decommission")
+	}
+
+	if service.Replicas() != 2 {
+		t.Fatalf("expected 2 replicas after blue-green update, got %d", service.Replicas())
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	phases := []string{}
+	promoted := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" {
+			continue
+		}
+		switch evt.Type {
+		case EventTypeUpdatePhase:
+			phases = append(phases, evt.Reason)
+		case EventTypePromoted:
+			promoted = true
+		case EventTypeAborted:
+			t.Fatalf("unexpected aborted event during successful blue-green update: %+v", evt)
+		}
+	}
+
+	expectedPhases := []string{
+		ReasonBlueGreenProvision,
+		ReasonBlueGreenVerify,
+		ReasonBlueGreenCutover,
+		ReasonBlueGreenDecommission,
+	}
+	if len(phases) < len(expectedPhases) {
+		t.Fatalf("missing blue-green phase events: got %v", phases)
+	}
+	for i, reason := range expectedPhases {
+		if phases[i] != reason {
+			t.Fatalf("expected phase %s at position %d, got %s", reason, i, phases[i])
+		}
+	}
+	if !promoted {
+		t.Fatalf("missing promoted event for blue-green update: %+v", recordedCopy)
+	}
+}
+
+func TestServiceUpdateBlueGreenVerifyFailureRollsBack(t *testing.T) {
+	blue0 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	blue1 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	greenFailed := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	greenSecond := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {blue0, blue1, greenFailed, greenSecond},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 2,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 256)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected first replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected second replica start, got %s", name)
+	}
+
+	blue0.waitCh <- nil
+	blue1.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator to finish")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment returned")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 2,
+		Command:  []string{"sleep", "1"},
+		Update: &stack.UpdatePolicy{
+			Strategy: "blueGreen",
+		},
+	}
+
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[2]" {
+		t.Fatalf("expected first green replica start, got %s", name)
+	}
+	if name := waitForServiceStart(t, rt.startCh); name != "api[3]" {
+		t.Fatalf("expected second green replica start, got %s", name)
+	}
+
+	greenFailed.waitCh <- errors.New("green readiness failed")
+	greenSecond.waitCh <- nil
+
+	select {
+	case err := <-updateDone:
+		if err == nil {
+			t.Fatalf("expected blue-green update failure")
+		}
+		if !strings.Contains(err.Error(), "blue-green verification failed") {
+			t.Fatalf("unexpected blue-green update error: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("timed out waiting for blue-green update failure")
+	}
+
+	select {
+	case <-greenFailed.stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("expected failed green replica to be stopped")
+	}
+
+	blue0Stopped := false
+	blue1Stopped := false
+	select {
+	case <-blue0.stopped:
+		blue0Stopped = true
+	default:
+	}
+	select {
+	case <-blue1.stopped:
+		blue1Stopped = true
+	default:
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	aborted := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" {
+			continue
+		}
+		switch evt.Type {
+		case EventTypeAborted:
+			aborted = true
+			if evt.Reason != ReasonBlueGreenRollback {
+				t.Fatalf("unexpected abort reason: %+v", evt)
+			}
+		case EventTypePromoted:
+			t.Fatalf("unexpected promoted event during blue-green rollback: %+v", evt)
+		}
+	}
+
+	if !aborted {
+		t.Fatalf("expected blue-green rollback event: %+v", recordedCopy)
+	}
+	if blue0Stopped || blue1Stopped {
+		t.Fatalf("blue replicas stopped during rollback: %+v", recordedCopy)
+	}
+}
+
 type recordingRuntime struct {
 	mu        sync.Mutex
 	instances map[string][]*fakeInstance

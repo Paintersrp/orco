@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,7 +137,10 @@ type serviceHandle struct {
 	updateMu sync.Mutex
 }
 
-const promotionRollbackTimeout = 5 * time.Second
+const (
+	promotionRollbackTimeout = 5 * time.Second
+	blueGreenAbortTimeout    = 2 * time.Second
+)
 
 type replicaHandle struct {
 	index      int
@@ -198,6 +202,21 @@ func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) (retErr 
 		return nil
 	}
 
+	newSpec := svc.Clone()
+	var previous *stack.Service
+	if h.service != nil {
+		previous = h.service.Clone()
+	}
+
+	strategy := "rolling"
+	if newSpec.Update != nil && strings.TrimSpace(newSpec.Update.Strategy) != "" {
+		strategy = strings.ToLower(strings.TrimSpace(newSpec.Update.Strategy))
+	}
+
+	if strategy == "bluegreen" {
+		return h.updateBlueGreen(ctx, newSpec, previous)
+	}
+
 	controller := newUpdateController()
 	if err := h.installController(controller); err != nil {
 		return err
@@ -207,10 +226,12 @@ func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) (retErr 
 		h.clearController(controller)
 	}()
 
-	newSpec := svc.Clone()
-	var previous *stack.Service
-	if h.service != nil {
-		previous = h.service.Clone()
+	return h.updateRolling(ctx, controller, newSpec, previous)
+}
+
+func (h *serviceHandle) updateRolling(ctx context.Context, controller *updateController, newSpec, previous *stack.Service) (retErr error) {
+	if controller == nil {
+		return fmt.Errorf("service %s update controller is nil", h.name)
 	}
 
 	canary := h.replicas[0]
@@ -256,6 +277,74 @@ func (h *serviceHandle) update(ctx context.Context, svc *stack.Service) (retErr 
 	return nil
 }
 
+func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *stack.Service) error {
+	if len(h.replicas) == 0 {
+		h.service = newSpec
+		return nil
+	}
+
+	blue := append([]*replicaHandle(nil), h.replicas...)
+	green := make([]*replicaHandle, len(blue))
+
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "provisioning green replica set", 0, ReasonBlueGreenProvision, nil)
+
+	for i, replica := range blue {
+		if replica == nil || replica.supervisor == nil {
+			return fmt.Errorf("service %s replica %d supervisor unavailable", h.name, i)
+		}
+		sup := newSupervisor(h.name, replica.index, newSpec, replica.supervisor.runtime, h.events, replica.supervisor.proxy)
+		green[i] = &replicaHandle{index: replica.index, supervisor: sup}
+		sup.Start(ctx)
+	}
+
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "verifying green replicas", 0, ReasonBlueGreenVerify, nil)
+
+	for _, replica := range green {
+		if err := replica.awaitReady(ctx); err != nil {
+			shutdownReplicaSet(ctx, green)
+			cause := fmt.Errorf("green replica %d readiness failed: %w", replica.index, err)
+			sendEvent(h.events, h.name, replica.index, EventTypeAborted, "blue-green update aborted", 0, ReasonBlueGreenRollback, cause)
+			return fmt.Errorf("service %s blue-green verification failed: %w", h.name, cause)
+		}
+	}
+
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "performing cutover to green replica set", 0, ReasonBlueGreenCutover, nil)
+
+	rollbackWindow := time.Duration(0)
+	drainTimeout := time.Duration(0)
+	if newSpec.Update != nil && newSpec.Update.BlueGreen != nil {
+		rollbackWindow = newSpec.Update.BlueGreen.RollbackWindow.Duration
+		drainTimeout = newSpec.Update.BlueGreen.DrainTimeout.Duration
+	}
+
+	h.replicas = green
+	h.service = newSpec
+	sendEvent(h.events, h.name, -1, EventTypePromoted, "blue-green cutover complete", 0, ReasonPromoted, nil)
+
+	if rollbackWindow > 0 {
+		rollbackTimer := time.NewTimer(rollbackWindow)
+		defer rollbackTimer.Stop()
+		select {
+		case <-rollbackTimer.C:
+		case <-ctx.Done():
+			shutdownReplicaSet(ctx, green)
+			h.replicas = blue
+			if previous != nil {
+				h.service = previous
+			}
+			err := fmt.Errorf("service %s blue-green rollback triggered: %w", h.name, ctx.Err())
+			sendEvent(h.events, h.name, -1, EventTypeAborted, "blue-green rollback initiated", 0, ReasonBlueGreenRollback, err)
+			return err
+		}
+	}
+
+	sendEvent(h.events, h.name, -1, EventTypeUpdatePhase, "decommissioning blue replica set", 0, ReasonBlueGreenDecommission, nil)
+	if err := h.stopReplicaSet(ctx, blue, drainTimeout); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (h *serviceHandle) start(ctx context.Context) {
 	for _, replica := range h.replicas {
 		replica.supervisor.Start(ctx)
@@ -275,6 +364,47 @@ func (h *serviceHandle) stop(ctx context.Context, events chan<- Event) error {
 		}
 	}
 	return firstErr
+}
+
+func (h *serviceHandle) stopReplicaSet(_ context.Context, replicas []*replicaHandle, drainTimeout time.Duration) error {
+	baseCtx := context.Background()
+	var firstErr error
+	for i := len(replicas) - 1; i >= 0; i-- {
+		replica := replicas[i]
+		if replica == nil || replica.supervisor == nil {
+			continue
+		}
+		sendEvent(h.events, h.name, replica.index, EventTypeStopping, "stopping service", 0, ReasonShutdown, nil)
+		stopCtx := baseCtx
+		var cancel context.CancelFunc
+		if drainTimeout > 0 {
+			stopCtx, cancel = context.WithTimeout(baseCtx, drainTimeout)
+		}
+		if err := replica.supervisor.Stop(stopCtx); err != nil {
+			sendEvent(h.events, h.name, replica.index, EventTypeError, "stop failed", 0, ReasonStopFailed, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("stop service %s replica %d: %w", h.name, replica.index, err)
+			}
+		}
+		if cancel != nil {
+			cancel()
+		}
+	}
+	return firstErr
+}
+
+func shutdownReplicaSet(_ context.Context, replicas []*replicaHandle) {
+	for _, replica := range replicas {
+		if replica == nil || replica.supervisor == nil {
+			continue
+		}
+		stopCtx := context.Background()
+		stopCtx, cancel := context.WithTimeout(stopCtx, blueGreenAbortTimeout)
+		_ = replica.supervisor.Stop(stopCtx)
+		if cancel != nil {
+			cancel()
+		}
+	}
 }
 
 func (r *replicaHandle) awaitExists(ctx context.Context) error {

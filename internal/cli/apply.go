@@ -112,8 +112,8 @@ func applyUpdates(ctx stdcontext.Context, cliCtx *context, stackName string, dep
 		metrics.SetServiceReady(name, false)
 
 		strategy := "rolling"
-		if svcSpec.Update != nil && svcSpec.Update.Strategy != "" {
-			strategy = svcSpec.Update.Strategy
+		if svcSpec.Update != nil && strings.TrimSpace(svcSpec.Update.Strategy) != "" {
+			strategy = strings.ToLower(strings.TrimSpace(svcSpec.Update.Strategy))
 		}
 		autoPromote := strategy != "canary"
 

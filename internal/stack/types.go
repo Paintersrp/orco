@@ -19,6 +19,7 @@ type (
 	CommandProbe  = config.CommandProbe
 	LogProbe      = config.LogProbeSpec
 	UpdatePolicy  = config.UpdateStrategy
+	BlueGreen     = config.BlueGreenStrategy
 	RestartPolicy = config.RestartPolicy
 	Backoff       = config.BackoffSpec
 	Resources     = config.Resources
