@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,8 +29,8 @@ func newPromoteCmd(ctx *context) *cobra.Command {
 			}
 
 			strategy := "rolling"
-			if svc.Update != nil && svc.Update.Strategy != "" {
-				strategy = svc.Update.Strategy
+			if svc.Update != nil && strings.TrimSpace(svc.Update.Strategy) != "" {
+				strategy = strings.ToLower(strings.TrimSpace(svc.Update.Strategy))
 			}
 			if strategy != "canary" {
 				return fmt.Errorf("service %s does not use the canary update strategy", svcName)

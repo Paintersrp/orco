@@ -537,6 +537,7 @@ type fakeInstance struct {
 
 	stopErr  error
 	startErr error
+	stopped  chan struct{}
 }
 
 func (f *fakeInstance) WaitReady(ctx context.Context) error {
@@ -585,6 +586,12 @@ func (f *fakeInstance) Stop(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+		default:
+		}
+	}
+	if f.stopped != nil {
+		select {
+		case f.stopped <- struct{}{}:
 		default:
 		}
 	}
