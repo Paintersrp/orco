@@ -1272,7 +1272,11 @@ func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
 	phases := []string{}
 	messages := []string{}
 	promoted := false
-	for _, evt := range recordedCopy {
+	cutoverIdx := -1
+	promotedIdx := -1
+	decommissionIdx := -1
+	stopIndices := []int{}
+	for idx, evt := range recordedCopy {
 		if evt.Service != "api" {
 			continue
 		}
@@ -1280,10 +1284,25 @@ func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
 		case EventTypeUpdatePhase:
 			phases = append(phases, evt.Reason)
 			messages = append(messages, evt.Message)
+			switch evt.Reason {
+			case ReasonBlueGreenCutover:
+				if cutoverIdx == -1 {
+					cutoverIdx = idx
+				}
+			case ReasonBlueGreenDecommission:
+				if decommissionIdx == -1 {
+					decommissionIdx = idx
+				}
+			}
 		case EventTypePromoted:
 			promoted = true
+			if promotedIdx == -1 {
+				promotedIdx = idx
+			}
 		case EventTypeAborted:
 			t.Fatalf("unexpected aborted event during successful blue-green update: %+v", evt)
+		case EventTypeStopping:
+			stopIndices = append(stopIndices, idx)
 		}
 	}
 
@@ -1317,6 +1336,31 @@ func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
 	}
 	if !promoted {
 		t.Fatalf("missing promoted event for blue-green update: %+v", recordedCopy)
+	}
+
+	if cutoverIdx == -1 {
+		t.Fatalf("missing blue-green cutover event in %+v", recordedCopy)
+	}
+	if promotedIdx == -1 {
+		t.Fatalf("missing promoted event index in %+v", recordedCopy)
+	}
+	if decommissionIdx == -1 {
+		t.Fatalf("missing blue-green decommission event in %+v", recordedCopy)
+	}
+	if cutoverIdx > promotedIdx {
+		t.Fatalf("cutover event should precede promotion, events: %+v", recordedCopy)
+	}
+	if promotedIdx > decommissionIdx {
+		t.Fatalf("promotion should occur before decommission, events: %+v", recordedCopy)
+	}
+	if len(stopIndices) < 2 {
+		t.Fatalf("expected at least two stop events for blue replicas, got %d (%+v)", len(stopIndices), recordedCopy)
+	}
+	for i := 0; i < 2; i++ {
+		idx := stopIndices[i]
+		if idx <= decommissionIdx {
+			t.Fatalf("blue replica stopped before decommission phase completed, events: %+v", recordedCopy)
+		}
 	}
 }
 
