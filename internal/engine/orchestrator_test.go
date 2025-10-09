@@ -1320,6 +1320,242 @@ func TestServiceUpdateBlueGreenSuccess(t *testing.T) {
 	}
 }
 
+func TestServiceUpdateBlueGreenProxyLabelSwitchNormalization(t *testing.T) {
+	blue := &fakeInstance{waitCh: make(chan error, 1)}
+	green := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {blue, green},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 1,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 64)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	upErrCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var err error
+		deployment, err = orch.Up(ctx, doc, graph, events)
+		upErrCh <- err
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected initial replica start, got %s", name)
+	}
+	blue.waitCh <- nil
+
+	select {
+	case err := <-upErrCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator up")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 1,
+		Update: &stack.UpdatePolicy{
+			Strategy: "blueGreen",
+			BlueGreen: &stack.BlueGreen{
+				Switch: "Proxy-Label",
+			},
+		},
+	}
+
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected green replica start, got %s", name)
+	}
+	green.waitCh <- nil
+
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatalf("blue-green update failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for blue-green update")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	found := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" || evt.Type != EventTypeUpdatePhase || evt.Reason != ReasonBlueGreenCutover {
+			continue
+		}
+		if evt.Message == fmt.Sprintf("%s (switch=%s)", blueGreenPhaseMessage(BlueGreenPhaseCutover), stack.BlueGreenSwitchProxyLabel) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected cutover event with proxyLabel switch, got %+v", recordedCopy)
+	}
+}
+
+func TestServiceUpdateBlueGreenInvalidSwitch(t *testing.T) {
+	blue := &fakeInstance{waitCh: make(chan error, 1)}
+	green := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {blue, green},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 1,
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 64)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for range events {
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	upErrCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var err error
+		deployment, err = orch.Up(ctx, doc, graph, events)
+		upErrCh <- err
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected initial replica start, got %s", name)
+	}
+	blue.waitCh <- nil
+
+	select {
+	case err := <-upErrCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator up")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 1,
+		Update: &stack.UpdatePolicy{
+			Strategy: "blueGreen",
+			BlueGreen: &stack.BlueGreen{
+				Switch: "invalid",
+			},
+		},
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected green replica start, got %s", name)
+	}
+	green.waitCh <- nil
+
+	var updateErr error
+	select {
+	case updateErr = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for update error")
+	}
+
+	if updateErr == nil {
+		t.Fatalf("expected update failure for invalid switch")
+	}
+	if !strings.Contains(updateErr.Error(), "unsupported value") {
+		t.Fatalf("unexpected error: %v", updateErr)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+}
+
 func TestServiceUpdateBlueGreenVerifyFailureRollsBack(t *testing.T) {
 	blue0 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
 	blue1 := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
