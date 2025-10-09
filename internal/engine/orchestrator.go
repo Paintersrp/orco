@@ -319,7 +319,12 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 		rollbackWindow = newSpec.Update.BlueGreen.RollbackWindow.Duration
 		drainTimeout = newSpec.Update.BlueGreen.DrainTimeout.Duration
 		if mode := strings.TrimSpace(newSpec.Update.BlueGreen.Switch); mode != "" {
-			switchMode = mode
+			normalized, err := normalizeBlueGreenSwitch(mode)
+			if err != nil {
+				shutdownReplicaSet(ctx, green)
+				return fmt.Errorf("service %s blue-green switch: %w", h.name, err)
+			}
+			switchMode = normalized
 		}
 	}
 
@@ -454,6 +459,23 @@ func (r *replicaHandle) awaitExists(ctx context.Context) error {
 		r.existsErr = r.supervisor.AwaitExists(ctx)
 	})
 	return r.existsErr
+}
+
+func normalizeBlueGreenSwitch(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return stack.BlueGreenSwitchPorts, nil
+	}
+
+	canonical := strings.ToLower(strings.ReplaceAll(trimmed, "-", ""))
+	switch canonical {
+	case stack.BlueGreenSwitchPorts:
+		return stack.BlueGreenSwitchPorts, nil
+	case strings.ToLower(stack.BlueGreenSwitchProxyLabel):
+		return stack.BlueGreenSwitchProxyLabel, nil
+	default:
+		return "", fmt.Errorf("unsupported value %q (supported values: %s, %s)", trimmed, stack.BlueGreenSwitchPorts, stack.BlueGreenSwitchProxyLabel)
+	}
 }
 
 func (r *replicaHandle) awaitStarted(ctx context.Context) error {
