@@ -1,25 +1,27 @@
 package cli
 
 import (
-	"encoding/json"
-	"fmt"
-	"time"
+        "encoding/json"
+        "fmt"
+        "strings"
+        "time"
 
-	"github.com/spf13/cobra"
+        "github.com/spf13/cobra"
 
-	"github.com/Paintersrp/orco/internal/cliutil"
-	"github.com/Paintersrp/orco/internal/engine"
+        "github.com/Paintersrp/orco/internal/cliutil"
+        "github.com/Paintersrp/orco/internal/engine"
 )
 
 func newLogsCmd(ctx *context) *cobra.Command {
-	var (
-		follow bool
-		since  time.Duration
-	)
-	cmd := &cobra.Command{
-		Use:   "logs [service]",
-		Short: "Tail structured logs",
-		Args:  cobra.MaximumNArgs(1),
+        var (
+                follow bool
+                since  time.Duration
+                outputFormat string
+        )
+        cmd := &cobra.Command{
+                Use:   "logs [service]",
+                Short: "Tail structured logs",
+                Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			doc, err := ctx.loadStack()
 			if err != nil {
@@ -39,17 +41,26 @@ func newLogsCmd(ctx *context) *cobra.Command {
 				cutoff = time.Now().Add(-since)
 			}
 
-			events, release, ok := ctx.subscribeLogStream(logBufferSize)
-			if !ok {
-				_, stackName := ctx.currentDeploymentInfo()
-				if stackName != "" {
-					return fmt.Errorf("stack %s has no active deployment", stackName)
-				}
-				return fmt.Errorf("no active deployment: start services with \"orco up\" first")
-			}
-			defer release()
+                        events, release, ok := ctx.subscribeLogStream(logBufferSize)
+                        if !ok {
+                                _, stackName := ctx.currentDeploymentInfo()
+                                if stackName != "" {
+                                        return fmt.Errorf("stack %s has no active deployment", stackName)
+                                }
+                                return fmt.Errorf("no active deployment: start services with \"orco up\" first")
+                        }
+                        defer release()
 
-			encoder := json.NewEncoder(cmd.OutOrStdout())
+                        format := strings.ToLower(outputFormat)
+                        if format == "" {
+                                format = "json"
+                        }
+
+                        if format != "json" {
+                                return fmt.Errorf("unsupported output format %q", format)
+                        }
+
+                        encoder := json.NewEncoder(cmd.OutOrStdout())
 
 			process := func(event engine.Event) {
 				if event.Type != engine.EventTypeLog {
@@ -107,8 +118,9 @@ func newLogsCmd(ctx *context) *cobra.Command {
 				}
 			}
 		},
-	}
-	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
-	cmd.Flags().DurationVar(&since, "since", 0, "Only include log entries newer than this duration")
-	return cmd
+        }
+        cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
+        cmd.Flags().DurationVar(&since, "since", 0, "Only include log entries newer than this duration")
+        cmd.Flags().StringVarP(&outputFormat, "output", "o", "json", "Output format (json)")
+        return cmd
 }

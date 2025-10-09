@@ -1,13 +1,15 @@
 package cli
 
 import (
-	"bytes"
-	stdcontext "context"
-	"strings"
-	"testing"
-	"time"
+        "bytes"
+        "encoding/json"
+        stdcontext "context"
+        "strings"
+        "testing"
+        "time"
 
-	"github.com/Paintersrp/orco/internal/engine"
+        "github.com/Paintersrp/orco/internal/api"
+        "github.com/Paintersrp/orco/internal/engine"
 )
 
 func TestStatusCommandReflectsBlockedAndReadyTransitions(t *testing.T) {
@@ -117,9 +119,9 @@ func findServiceLine(output, service string) string {
 }
 
 func TestStatusCommandHistoryFlag(t *testing.T) {
-	t.Parallel()
+        t.Parallel()
 
-	stackPath := writeStackFile(t, `version: "0.1"
+        stackPath := writeStackFile(t, `version: "0.1"
 stack:
   name: "demo"
   workdir: "."
@@ -162,7 +164,87 @@ services:
 	if !strings.Contains(output, engine.ReasonProbeReady) {
 		t.Fatalf("expected second reason in history output: %s", output)
 	}
-	if !strings.Contains(output, "launch") || !strings.Contains(output, "online") {
-		t.Fatalf("expected messages in history output: %s", output)
-	}
+        if !strings.Contains(output, "launch") || !strings.Contains(output, "online") {
+                t.Fatalf("expected messages in history output: %s", output)
+        }
+}
+
+func TestStatusCommandJSONOutput(t *testing.T) {
+        t.Parallel()
+
+        stackPath := writeStackFile(t, `version: "0.1"
+stack:
+  name: "demo"
+  workdir: "."
+defaults:
+  health:
+    cmd:
+      command: ["true"]
+services:
+  api:
+    runtime: process
+    command: ["sleep", "0"]
+  db:
+    runtime: process
+    command: ["sleep", "0"]
+`)
+
+        ctx := &context{stackFile: &stackPath}
+        tracker := ctx.statusTracker()
+
+        base := time.Now().Add(-3 * time.Minute)
+        tracker.Apply(engine.Event{Service: "api", Type: engine.EventTypeStarting, Timestamp: base, Reason: engine.ReasonInitialStart})
+        tracker.Apply(engine.Event{Service: "api", Type: engine.EventTypeReady, Timestamp: base.Add(20 * time.Second), Reason: engine.ReasonProbeReady})
+        tracker.Apply(engine.Event{Service: "db", Type: engine.EventTypeReady, Timestamp: base.Add(10 * time.Second), Reason: engine.ReasonProbeReady})
+
+        cmd := newStatusCmd(ctx)
+        cmd.SetContext(stdcontext.Background())
+        var stdout, stderr bytes.Buffer
+        cmd.SetOut(&stdout)
+        cmd.SetErr(&stderr)
+        cmd.SetArgs([]string{"--output", "json", "--history", "5"})
+
+        if err := cmd.Execute(); err != nil {
+                t.Fatalf("status command failed: %v\nstderr: %s", err, stderr.String())
+        }
+
+        var report api.StatusReport
+        if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+                t.Fatalf("failed to decode json output: %v\noutput: %s", err, stdout.String())
+        }
+
+        if report.Stack != "demo" {
+                t.Fatalf("expected stack name demo, got %s", report.Stack)
+        }
+        if report.Version != "0.1" {
+                t.Fatalf("expected version 0.1, got %s", report.Version)
+        }
+        if report.GeneratedAt.IsZero() {
+                t.Fatalf("expected GeneratedAt to be populated")
+        }
+
+        apiReport, ok := report.Services["api"]
+        if !ok {
+                t.Fatalf("expected api service in report, got: %#v", report.Services)
+        }
+        if apiReport.State != engine.EventTypeReady {
+                t.Fatalf("expected api state ready, got %s", apiReport.State)
+        }
+        if apiReport.LastReason != engine.ReasonProbeReady {
+                t.Fatalf("expected api last reason %s, got %s", engine.ReasonProbeReady, apiReport.LastReason)
+        }
+        if len(apiReport.History) == 0 {
+                t.Fatalf("expected api history to be populated")
+        }
+
+        dbReport, ok := report.Services["db"]
+        if !ok {
+                t.Fatalf("expected db service in report, got: %#v", report.Services)
+        }
+        if dbReport.State != engine.EventTypeReady {
+                t.Fatalf("expected db state ready, got %s", dbReport.State)
+        }
+        if dbReport.LastReason != engine.ReasonProbeReady {
+                t.Fatalf("expected db last reason %s, got %s", engine.ReasonProbeReady, dbReport.LastReason)
+        }
 }
