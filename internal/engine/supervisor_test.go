@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -606,6 +607,112 @@ func (f *fakeInstance) Logs(ctx context.Context) (<-chan runtime.LogEntry, error
 	return f.logsCh, nil
 }
 
+func waitForHookPhase(t *testing.T, exec *fakeHookExecutor, phase string) {
+	t.Helper()
+	select {
+	case got := <-exec.callCh:
+		if got != phase {
+			t.Fatalf("unexpected hook phase: got %s want %s", got, phase)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s hook", phase)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+type fakeHookExecutor struct {
+	mu      sync.Mutex
+	phases  []string
+	results map[string]hookResult
+	blocks  map[string]chan struct{}
+	callCh  chan string
+}
+
+func newFakeHookExecutor() *fakeHookExecutor {
+	return &fakeHookExecutor{
+		results: make(map[string]hookResult),
+		blocks:  make(map[string]chan struct{}),
+		callCh:  make(chan string, 16),
+	}
+}
+
+func (f *fakeHookExecutor) Run(ctx context.Context, svc *stack.Service, phase string, hook *stack.LifecycleHook) hookResult {
+	f.mu.Lock()
+	res, ok := f.results[phase]
+	if !ok {
+		res = hookResult{Phase: phase}
+	}
+	copyRes := res
+	if copyRes.Phase == "" {
+		copyRes.Phase = phase
+	}
+	if len(copyRes.Command) == 0 && hook != nil {
+		copyRes.Command = append([]string(nil), hook.Command...)
+	} else if len(copyRes.Command) > 0 {
+		copyRes.Command = append([]string(nil), copyRes.Command...)
+	}
+	if len(copyRes.Logs) > 0 {
+		copyRes.Logs = append([]hookLog(nil), copyRes.Logs...)
+	}
+	f.phases = append(f.phases, phase)
+	block := f.blocks[phase]
+	f.mu.Unlock()
+
+	select {
+	case f.callCh <- phase:
+	default:
+	}
+
+	if block != nil {
+		<-block
+	}
+	return copyRes
+}
+
+func (f *fakeHookExecutor) setResult(phase string, res hookResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.results == nil {
+		f.results = make(map[string]hookResult)
+	}
+	if res.Phase == "" {
+		res.Phase = phase
+	}
+	f.results[phase] = res
+}
+
+func (f *fakeHookExecutor) setBlock(phase string, ch chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.blocks == nil {
+		f.blocks = make(map[string]chan struct{})
+	}
+	if ch == nil {
+		delete(f.blocks, phase)
+	} else {
+		f.blocks[phase] = ch
+	}
+}
+
+func (f *fakeHookExecutor) calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.phases))
+	copy(out, f.phases)
+	return out
+}
+
 func TestSupervisorManualRestart(t *testing.T) {
 	svc := &stack.Service{}
 
@@ -693,5 +800,224 @@ collect:
 
 	if err := sup.Stop(context.Background()); err != nil {
 		t.Fatalf("stop supervisor: %v", err)
+	}
+}
+
+func TestSupervisorHooksOrdering(t *testing.T) {
+	svc := &stack.Service{
+		Hooks: &stack.ServiceHooks{
+			PreStart:  &stack.LifecycleHook{Command: []string{"true"}},
+			PostStart: &stack.LifecycleHook{Command: []string{"true"}},
+			PreStop:   &stack.LifecycleHook{Command: []string{"true"}},
+			PostStop:  &stack.LifecycleHook{Command: []string{"true"}},
+		},
+	}
+
+	inst := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	rt := &fakeRuntime{instances: []*fakeInstance{inst}, startCh: make(chan struct{}, 4)}
+
+	events := make(chan Event, 32)
+	sup := newSupervisor("svc", 0, svc, rt, events, nil)
+	sup.jitter = func(d time.Duration) time.Duration { return d }
+	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	hooks := newFakeHookExecutor()
+	preStartGate := make(chan struct{})
+	hooks.setBlock("preStart", preStartGate)
+	preStopGate := make(chan struct{})
+	hooks.setBlock("preStop", preStopGate)
+	sup.hooks = hooks
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup.Start(ctx)
+
+	waitForHookPhase(t, hooks, "preStart")
+
+	select {
+	case <-rt.startCh:
+		t.Fatalf("runtime start invoked before preStart hook completed")
+	default:
+	}
+
+	close(preStartGate)
+
+	waitForStart(t, rt.startCh)
+
+	if calls := hooks.calls(); len(calls) != 1 || calls[0] != "preStart" {
+		t.Fatalf("unexpected hook sequence before readiness: %v", calls)
+	}
+
+	inst.waitCh <- nil
+
+	if err := sup.AwaitReady(context.Background()); err != nil {
+		t.Fatalf("await ready: %v", err)
+	}
+
+	waitForHookPhase(t, hooks, "postStart")
+
+	stopErrCh := make(chan error, 1)
+	go func() {
+		stopErrCh <- sup.Stop(context.Background())
+	}()
+
+	waitForHookPhase(t, hooks, "preStop")
+
+	select {
+	case <-inst.stopped:
+		t.Fatalf("instance stopped before preStop hook completed")
+	default:
+	}
+
+	close(preStopGate)
+
+	select {
+	case <-inst.stopped:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for instance stop")
+	}
+
+	waitForHookPhase(t, hooks, "postStop")
+
+	if err := <-stopErrCh; err != nil {
+		t.Fatalf("stop returned error: %v", err)
+	}
+
+	expected := []string{"preStart", "postStart", "preStop", "postStop"}
+	if got := hooks.calls(); !equalStrings(got, expected) {
+		t.Fatalf("unexpected hook invocation order: got %v, want %v", got, expected)
+	}
+}
+
+func TestSupervisorPreStartHookTimeout(t *testing.T) {
+	svc := &stack.Service{
+		Hooks: &stack.ServiceHooks{
+			PreStart: &stack.LifecycleHook{Command: []string{"true"}},
+		},
+		RestartPolicy: &stack.RestartPolicy{MaxRetries: 0},
+	}
+
+	rt := &fakeRuntime{startCh: make(chan struct{}, 1)}
+	events := make(chan Event, 32)
+	sup := newSupervisor("api", 0, svc, rt, events, nil)
+	sup.jitter = func(d time.Duration) time.Duration { return d }
+	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	hooks := newFakeHookExecutor()
+	hooks.setResult("preStart", hookResult{
+		Phase:    "preStart",
+		Command:  []string{"true"},
+		Err:      context.DeadlineExceeded,
+		TimedOut: true,
+	})
+	sup.hooks = hooks
+
+	sup.Start(context.Background())
+
+	readyCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := sup.AwaitReady(readyCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("await ready error = %v, want deadline exceeded", err)
+	}
+
+	select {
+	case <-rt.startCh:
+		t.Fatalf("runtime start invoked despite preStart hook failure")
+	default:
+	}
+
+	var hookEvt Event
+	collected := make([]Event, 0, 8)
+	deadline := time.After(time.Second)
+waitHookEvent:
+	for {
+		select {
+		case evt := <-events:
+			collected = append(collected, evt)
+			if evt.Source == "hook" && evt.Type == EventTypeError {
+				hookEvt = evt
+				break waitHookEvent
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for hook error event; got %v", collected)
+		}
+	}
+
+	if hookEvt.Reason != ReasonHookFailed {
+		t.Fatalf("unexpected hook event reason: %s", hookEvt.Reason)
+	}
+	if !strings.Contains(hookEvt.Message, "preStart hook timed out") {
+		t.Fatalf("unexpected hook event message: %q", hookEvt.Message)
+	}
+	if !errors.Is(hookEvt.Err, context.DeadlineExceeded) {
+		t.Fatalf("unexpected hook event error: %v", hookEvt.Err)
+	}
+
+	if err := sup.Stop(context.Background()); err != nil {
+		t.Fatalf("stop supervisor: %v", err)
+	}
+}
+
+func TestSupervisorPreStopHookErrorEvent(t *testing.T) {
+	svc := &stack.Service{
+		Hooks: &stack.ServiceHooks{
+			PreStart: &stack.LifecycleHook{Command: []string{"true"}},
+			PreStop:  &stack.LifecycleHook{Command: []string{"true"}},
+		},
+	}
+
+	inst := &fakeInstance{waitCh: make(chan error, 1), stopped: make(chan struct{}, 1)}
+	rt := &fakeRuntime{instances: []*fakeInstance{inst}, startCh: make(chan struct{}, 2)}
+	events := make(chan Event, 32)
+	sup := newSupervisor("svc", 0, svc, rt, events, nil)
+	sup.jitter = func(d time.Duration) time.Duration { return d }
+	sup.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	hooks := newFakeHookExecutor()
+	hooks.setResult("preStop", hookResult{Phase: "preStop", Err: errors.New("cleanup failed")})
+	sup.hooks = hooks
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup.Start(ctx)
+
+	waitForStart(t, rt.startCh)
+	inst.waitCh <- nil
+
+	if err := sup.AwaitReady(context.Background()); err != nil {
+		t.Fatalf("await ready: %v", err)
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- sup.Stop(context.Background()) }()
+
+	var hookEvt Event
+	collected := make([]Event, 0, 8)
+	deadline := time.After(time.Second)
+waitPreStopEvent:
+	for {
+		select {
+		case evt := <-events:
+			collected = append(collected, evt)
+			if evt.Source == "hook" && evt.Type == EventTypeError && strings.Contains(evt.Message, "preStop hook failed") {
+				hookEvt = evt
+				break waitPreStopEvent
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for preStop hook error event; got %v", collected)
+		}
+	}
+
+	if hookEvt.Err == nil || hookEvt.Err.Error() != "cleanup failed" {
+		t.Fatalf("unexpected hook event error: %v", hookEvt.Err)
+	}
+
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("stop returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for stop to complete")
 	}
 }

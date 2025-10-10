@@ -60,8 +60,9 @@ const (
 	ReasonBlueGreenProvision    = "bluegreen_provision"
 	ReasonBlueGreenVerify       = "bluegreen_verify"
 	ReasonBlueGreenCutover      = "bluegreen_cutover"
-	ReasonBlueGreenDecommission = "bluegreen_decommission"
-	ReasonBlueGreenRollback     = "bluegreen_rollback"
+        ReasonBlueGreenDecommission = "bluegreen_decommission"
+        ReasonBlueGreenRollback     = "bluegreen_rollback"
+        ReasonHookFailed            = "hook_failed"
 )
 
 // BlueGreenPhase enumerates the major milestones emitted while executing a

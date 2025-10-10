@@ -56,6 +56,8 @@ type supervisor struct {
 	restartCh chan *restartRequest
 	failureCh chan error
 
+	hooks hookExecutor
+
 	readyOnce sync.Once
 	readyCh   chan error
 
@@ -95,6 +97,7 @@ func newSupervisor(name string, replica int, svc *stack.Service, rt runtime.Runt
 		restartCh: make(chan *restartRequest),
 		failureCh: make(chan error, 1),
 		proxy:     proxyClone,
+		hooks:     newCommandHookExecutor(),
 	}
 
 	sup.jitter = defaultJitter
@@ -358,8 +361,20 @@ func (s *supervisor) run() {
 		sendEvent(s.events, s.name, s.replica, EventTypeStarting, "starting service", attempt, reason, nil)
 		metrics.SetServiceReady(s.name, false)
 
-		spec := buildStartSpec(s.name, s.replica, s.serviceSpec(), s.proxy)
-		instance, err := s.runtime.Start(s.ctx, spec)
+		svcSpec := s.serviceSpec()
+		spec := buildStartSpec(s.name, s.replica, svcSpec, s.proxy)
+
+		var instance runtime.Handle
+		var err error
+
+		if svcSpec != nil && svcSpec.Hooks != nil && svcSpec.Hooks.PreStart != nil {
+			err = s.executeHook(s.ctx, attempt, "preStart", svcSpec, svcSpec.Hooks.PreStart)
+		}
+
+		if err == nil {
+			instance, err = s.runtime.Start(s.ctx, spec)
+		}
+
 		if err != nil {
 			if s.ctx.Err() != nil {
 				err = s.ctx.Err()
@@ -401,7 +416,7 @@ func (s *supervisor) run() {
 
 		s.deliverStarted(nil)
 		s.setCurrent(instance)
-		instErr, ready, next := s.manageInstance(instance, attempt, pending)
+		instErr, ready, next := s.manageInstance(instance, attempt, pending, spec.Service)
 		s.clearCurrent()
 
 		if next != nil {
@@ -533,7 +548,7 @@ func (s *supervisor) sleepBackoff(base *time.Duration) error {
 	return nil
 }
 
-func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pending *restartRequest) (error, bool, *restartRequest) {
+func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pending *restartRequest, svc *stack.Service) (error, bool, *restartRequest) {
 	var logWG sync.WaitGroup
 	if instance != nil {
 		logs, err := instance.Logs(s.ctx)
@@ -552,6 +567,17 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 
 	healthCh := instance.Health()
 	readyObserved := false
+
+	var postStartDone bool
+	runPostStart := func() {
+		if postStartDone {
+			return
+		}
+		postStartDone = true
+		if svc != nil && svc.Hooks != nil && svc.Hooks.PostStart != nil {
+			_ = s.executeHook(s.ctx, attempt, "postStart", svc, svc.Hooks.PostStart)
+		}
+	}
 
 	waitCh := make(chan error, 1)
 	waitCtx, waitCancel := context.WithCancel(context.Background())
@@ -577,7 +603,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 			}
 			sendEvent(s.events, s.name, s.replica, EventTypeStopping, "stopping for restart", attempt, ReasonRestart, nil)
 			metrics.SetServiceReady(s.name, false)
-			err := s.stopInstance(instance, stopCtx)
+			err := s.stopInstance(instance, stopCtx, svc, attempt)
 			if cancel != nil {
 				cancel()
 			}
@@ -599,7 +625,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 					return s.ctx.Err(), readyObserved, nil
 				}
 				ctx, cancel := failureStopContext()
-				_ = s.stopInstance(instance, ctx)
+				_ = s.stopInstance(instance, ctx, svc, attempt)
 				cancel()
 				logWG.Wait()
 				return err, readyObserved, nil
@@ -613,6 +639,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 			if healthCh == nil {
 				metrics.SetServiceReady(s.name, true)
 				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
+				runPostStart()
 			}
 		case state, ok := <-healthCh:
 			if !ok {
@@ -626,7 +653,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 						pendingRestart = nil
 					}
 					ctx, cancel := failureStopContext()
-					_ = s.stopInstance(instance, ctx)
+					_ = s.stopInstance(instance, ctx, svc, attempt)
 					cancel()
 					logWG.Wait()
 					return errors.New("health channel closed"), readyObserved, nil
@@ -643,6 +670,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 				}
 				metrics.SetServiceReady(s.name, true)
 				sendEvent(s.events, s.name, s.replica, EventTypeReady, "service ready", attempt, ReasonProbeReady, nil)
+				runPostStart()
 			case probe.StatusUnready:
 				if !readyObserved {
 					if pendingRestart != nil {
@@ -654,7 +682,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 						pendingRestart = nil
 					}
 					ctx, cancel := failureStopContext()
-					_ = s.stopInstance(instance, ctx)
+					_ = s.stopInstance(instance, ctx, svc, attempt)
 					cancel()
 					logWG.Wait()
 					if state.Err != nil {
@@ -665,7 +693,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 				metrics.SetServiceReady(s.name, false)
 				sendEvent(s.events, s.name, s.replica, EventTypeUnready, "service unready", attempt, ReasonProbeUnready, state.Err)
 				ctx, cancel := failureStopContext()
-				_ = s.stopInstance(instance, ctx)
+				_ = s.stopInstance(instance, ctx, svc, attempt)
 				cancel()
 			}
 		case err := <-waitCh:
@@ -685,7 +713,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 					s.deliverInitial(s.ctx.Err())
 				}
 				stopCtx := s.stopContext()
-				stopErr := s.stopInstance(instance, stopCtx)
+				stopErr := s.stopInstance(instance, stopCtx, svc, attempt)
 				s.setStopErr(stopErr)
 				logWG.Wait()
 				sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
@@ -704,7 +732,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 				s.deliverInitial(exitErr)
 			}
 			ctx, cancel := failureStopContext()
-			_ = s.stopInstance(instance, ctx)
+			_ = s.stopInstance(instance, ctx, svc, attempt)
 			cancel()
 			logWG.Wait()
 			return exitErr, readyObserved, nil
@@ -717,7 +745,7 @@ func (s *supervisor) manageInstance(instance runtime.Handle, attempt int, pendin
 				s.deliverInitial(s.ctx.Err())
 			}
 			stopCtx := s.stopContext()
-			err := s.stopInstance(instance, stopCtx)
+			err := s.stopInstance(instance, stopCtx, svc, attempt)
 			s.setStopErr(err)
 			logWG.Wait()
 			sendEvent(s.events, s.name, s.replica, EventTypeStopped, "service stopped", attempt, ReasonSupervisorStop, nil)
@@ -800,6 +828,23 @@ func (s *supervisor) emitLog(evt Event, block bool) bool {
 	}
 }
 
+func (s *supervisor) emitEvent(evt Event) {
+	if s.events == nil {
+		return
+	}
+	if s.ctx == nil {
+		select {
+		case s.events <- evt:
+		default:
+		}
+		return
+	}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
+}
+
 func (s *supervisor) emitDropped(count int, block bool, attempt int) bool {
 	evt := Event{
 		Timestamp: time.Now(),
@@ -814,14 +859,74 @@ func (s *supervisor) emitDropped(count int, block bool, attempt int) bool {
 	return s.emitLog(evt, block)
 }
 
-func (s *supervisor) stopInstance(instance runtime.Handle, ctx context.Context) error {
+func (s *supervisor) executeHook(ctx context.Context, attempt int, phase string, svc *stack.Service, hook *stack.LifecycleHook) error {
+	if s.hooks == nil || hook == nil {
+		return nil
+	}
+	res := s.hooks.Run(ctx, svc, phase, hook)
+	for _, entry := range res.Logs {
+		level := "info"
+		if entry.Stream == hookStreamStderr {
+			level = "warn"
+		}
+		evt := Event{
+			Timestamp: time.Now(),
+			Service:   s.name,
+			Replica:   s.replica,
+			Type:      EventTypeLog,
+			Message:   entry.Message,
+			Level:     level,
+			Source:    "hook",
+			Attempt:   attempt,
+		}
+		s.emitLog(evt, false)
+	}
+	if res.Err == nil {
+		return nil
+	}
+	message := fmt.Sprintf("%s hook failed", phase)
+	if res.TimedOut {
+		if hook.Timeout.Duration > 0 {
+			message = fmt.Sprintf("%s hook timed out after %s", phase, hook.Timeout.Duration)
+		} else {
+			message = fmt.Sprintf("%s hook timed out", phase)
+		}
+	}
+	if len(res.Command) > 0 {
+		message = fmt.Sprintf("%s (command=%s)", message, joinCommand(res.Command))
+	}
+	message = fmt.Sprintf("%s: %v", message, res.Err)
+	evt := Event{
+		Timestamp: time.Now(),
+		Service:   s.name,
+		Replica:   s.replica,
+		Type:      EventTypeError,
+		Message:   message,
+		Level:     "error",
+		Source:    "hook",
+		Err:       res.Err,
+		Attempt:   attempt,
+		Reason:    ReasonHookFailed,
+	}
+	s.emitEvent(evt)
+	return res.Err
+}
+
+func (s *supervisor) stopInstance(instance runtime.Handle, ctx context.Context, svc *stack.Service, attempt int) error {
 	if instance == nil {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return instance.Stop(ctx)
+	if svc != nil && svc.Hooks != nil && svc.Hooks.PreStop != nil {
+		_ = s.executeHook(ctx, attempt, "preStop", svc, svc.Hooks.PreStop)
+	}
+	err := instance.Stop(ctx)
+	if svc != nil && svc.Hooks != nil && svc.Hooks.PostStop != nil {
+		_ = s.executeHook(context.Background(), attempt, "postStop", svc, svc.Hooks.PostStop)
+	}
+	return err
 }
 
 func failureStopContext() (context.Context, context.CancelFunc) {
