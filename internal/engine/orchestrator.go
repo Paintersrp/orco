@@ -307,7 +307,8 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 		if err := replica.awaitReady(ctx); err != nil {
 			shutdownReplicaSet(ctx, green)
 			cause := fmt.Errorf("green replica %d readiness failed: %w", replica.index, err)
-			sendEvent(h.events, h.name, replica.index, EventTypeAborted, "blue-green update aborted", 0, ReasonBlueGreenRollback, cause)
+			message := fmt.Sprintf("blue-green verification failed: %v", cause)
+			sendEvent(h.events, h.name, replica.index, EventTypeAborted, message, 0, ReasonBlueGreenRollback, cause)
 			return fmt.Errorf("service %s blue-green verification failed: %w", h.name, cause)
 		}
 	}
@@ -380,7 +381,8 @@ func (h *serviceHandle) updateBlueGreen(ctx context.Context, newSpec, previous *
 				h.service = previous
 			}
 			err := fmt.Errorf("service %s blue-green rollback triggered: %w", h.name, rollbackErr)
-			sendEvent(h.events, h.name, -1, EventTypeAborted, "blue-green rollback initiated", 0, ReasonBlueGreenRollback, err)
+			message := fmt.Sprintf("blue-green rollback initiated: %v", rollbackErr)
+			sendEvent(h.events, h.name, -1, EventTypeAborted, message, 0, ReasonBlueGreenRollback, err)
 			return err
 		}
 	}
