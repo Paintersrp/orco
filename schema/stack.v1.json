@@ -237,6 +237,9 @@
         },
         "resources": {
           "$ref": "#/$defs/resources"
+        },
+        "hooks": {
+          "$ref": "#/$defs/serviceHooks"
         }
       }
     },
@@ -255,6 +258,52 @@
         },
         "timeout": {
           "$ref": "#/$defs/duration"
+        }
+      }
+    },
+    "serviceHooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preStart": {
+          "$ref": "#/$defs/serviceHook"
+        },
+        "postStart": {
+          "$ref": "#/$defs/serviceHook"
+        },
+        "preStop": {
+          "$ref": "#/$defs/serviceHook"
+        },
+        "postStop": {
+          "$ref": "#/$defs/serviceHook"
+        }
+      }
+    },
+    "serviceHook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration"
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },

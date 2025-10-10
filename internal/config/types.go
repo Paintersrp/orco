@@ -160,7 +160,23 @@ type ServiceSpec struct {
 	Replicas        int               `yaml:"replicas"`
 	RestartPolicy   *RestartPolicy    `yaml:"restartPolicy"`
 	Resources       *Resources        `yaml:"resources"`
+	Hooks           *ServiceHooks     `yaml:"hooks"`
 	ResolvedWorkdir string            `yaml:"-"`
+}
+
+// ServiceHooks defines lifecycle hooks executed around service operations.
+type ServiceHooks struct {
+	PreStart  *LifecycleHookSpec `yaml:"preStart"`
+	PostStart *LifecycleHookSpec `yaml:"postStart"`
+	PreStop   *LifecycleHookSpec `yaml:"preStop"`
+	PostStop  *LifecycleHookSpec `yaml:"postStop"`
+}
+
+// LifecycleHookSpec describes a single hook command.
+type LifecycleHookSpec struct {
+	Command []string          `yaml:"command"`
+	Timeout Duration          `yaml:"timeout"`
+	Options map[string]string `yaml:"options"`
 }
 
 // Resources captures resource constraints requested for a service.
@@ -470,6 +486,11 @@ func (s *Stack) Validate() error {
 				}
 			}
 		}
+		if svc.Hooks != nil {
+			if err := validateServiceHooks(name, svc.Hooks); err != nil {
+				return err
+			}
+		}
 	}
 	if err := validatePortCollisions(s); err != nil {
 		return err
@@ -543,6 +564,41 @@ func validateProbe(name string, p *ProbeSpec) error {
 	}
 	if p.Command != nil && p.Command.Timeout.Duration == 0 {
 		p.Command.Timeout = p.Timeout
+	}
+	return nil
+}
+
+func validateServiceHooks(service string, hooks *ServiceHooks) error {
+	phases := []struct {
+		name string
+		hook *LifecycleHookSpec
+	}{
+		{name: "preStart", hook: hooks.PreStart},
+		{name: "postStart", hook: hooks.PostStart},
+		{name: "preStop", hook: hooks.PreStop},
+		{name: "postStop", hook: hooks.PostStop},
+	}
+
+	for _, phase := range phases {
+		if phase.hook == nil {
+			continue
+		}
+		if len(phase.hook.Command) == 0 {
+			return fmt.Errorf("%s: must contain at least one entry", serviceField(service, "hooks", phase.name, "command"))
+		}
+		for i, arg := range phase.hook.Command {
+			if strings.TrimSpace(arg) == "" {
+				return fmt.Errorf("%s: must be non-empty", serviceField(service, "hooks", phase.name, fmt.Sprintf("command[%d]", i)))
+			}
+		}
+		if phase.hook.Timeout.IsSet() && phase.hook.Timeout.Duration < 0 {
+			return fmt.Errorf("%s: must be non-negative", serviceField(service, "hooks", phase.name, "timeout"))
+		}
+		for key := range phase.hook.Options {
+			if strings.TrimSpace(key) == "" {
+				return fmt.Errorf("%s: option keys must be non-empty", serviceField(service, "hooks", phase.name, "options"))
+			}
+		}
 	}
 	return nil
 }
@@ -683,7 +739,51 @@ func (s *ServiceSpec) Clone() *ServiceSpec {
 	if s.Resources != nil {
 		cp.Resources = s.Resources.Clone()
 	}
+	if s.Hooks != nil {
+		cp.Hooks = s.Hooks.Clone()
+	}
 	return &cp
+}
+
+// Clone creates a deep copy of the lifecycle hooks configuration.
+func (h *ServiceHooks) Clone() *ServiceHooks {
+	if h == nil {
+		return nil
+	}
+	cp := &ServiceHooks{}
+	if h.PreStart != nil {
+		cp.PreStart = h.PreStart.Clone()
+	}
+	if h.PostStart != nil {
+		cp.PostStart = h.PostStart.Clone()
+	}
+	if h.PreStop != nil {
+		cp.PreStop = h.PreStop.Clone()
+	}
+	if h.PostStop != nil {
+		cp.PostStop = h.PostStop.Clone()
+	}
+	return cp
+}
+
+// Clone creates a deep copy of the lifecycle hook specification.
+func (h *LifecycleHookSpec) Clone() *LifecycleHookSpec {
+	if h == nil {
+		return nil
+	}
+	cp := &LifecycleHookSpec{
+		Timeout: h.Timeout,
+	}
+	if len(h.Command) > 0 {
+		cp.Command = append([]string(nil), h.Command...)
+	}
+	if len(h.Options) > 0 {
+		cp.Options = make(map[string]string, len(h.Options))
+		for k, v := range h.Options {
+			cp.Options[k] = v
+		}
+	}
+	return cp
 }
 
 // Clone creates a deep copy of the probe configuration.

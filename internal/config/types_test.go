@@ -390,6 +390,98 @@ func TestStackValidatePodmanRequiresImage(t *testing.T) {
 	}
 }
 
+func TestStackValidateServiceHooks(t *testing.T) {
+	mkStack := func(hooks *ServiceHooks) *Stack {
+		return &Stack{
+			Version: "0.1",
+			Stack:   StackMeta{Name: "demo"},
+			Services: map[string]*ServiceSpec{
+				"api": {
+					Runtime:  "docker",
+					Image:    "ghcr.io/demo/api:latest",
+					Replicas: 1,
+					Health: &ProbeSpec{
+						HTTP: &HTTPProbeSpec{URL: "http://localhost:8080/health"},
+					},
+					Hooks: hooks,
+				},
+			},
+		}
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		hooks := &ServiceHooks{
+			PreStart: &LifecycleHookSpec{
+				Command: []string{"/bin/true"},
+				Timeout: Duration{Duration: 2 * time.Second, explicit: true},
+				Options: map[string]string{"retries": "3"},
+			},
+		}
+		if err := mkStack(hooks).Validate(); err != nil {
+			t.Fatalf("unexpected validation error: %v", err)
+		}
+	})
+
+	t.Run("missing command", func(t *testing.T) {
+		hooks := &ServiceHooks{PreStart: &LifecycleHookSpec{}}
+		err := mkStack(hooks).Validate()
+		if err == nil || !strings.Contains(err.Error(), "services.api.hooks.preStart.command") {
+			t.Fatalf("expected command error, got %v", err)
+		}
+	})
+
+	t.Run("empty command argument", func(t *testing.T) {
+		hooks := &ServiceHooks{PreStart: &LifecycleHookSpec{Command: []string{""}}}
+		err := mkStack(hooks).Validate()
+		if err == nil || !strings.Contains(err.Error(), "services.api.hooks.preStart.command[0]") {
+			t.Fatalf("expected command argument error, got %v", err)
+		}
+	})
+
+	t.Run("negative timeout", func(t *testing.T) {
+		hooks := &ServiceHooks{PreStart: &LifecycleHookSpec{Command: []string{"/bin/true"}, Timeout: Duration{Duration: -time.Second, explicit: true}}}
+		err := mkStack(hooks).Validate()
+		if err == nil || !strings.Contains(err.Error(), "services.api.hooks.preStart.timeout") {
+			t.Fatalf("expected timeout error, got %v", err)
+		}
+	})
+
+	t.Run("empty option key", func(t *testing.T) {
+		hooks := &ServiceHooks{PreStart: &LifecycleHookSpec{Command: []string{"/bin/true"}, Options: map[string]string{"": "value"}}}
+		err := mkStack(hooks).Validate()
+		if err == nil || !strings.Contains(err.Error(), "services.api.hooks.preStart.options") {
+			t.Fatalf("expected options error, got %v", err)
+		}
+	})
+}
+
+func TestServiceHooksClone(t *testing.T) {
+	hooks := &ServiceHooks{
+		PreStart: &LifecycleHookSpec{
+			Command: []string{"/bin/true", "--flag"},
+			Timeout: Duration{Duration: time.Second, explicit: true},
+			Options: map[string]string{"foo": "bar"},
+		},
+		PostStop: &LifecycleHookSpec{Command: []string{"cleanup"}},
+	}
+
+	svc := &ServiceSpec{Hooks: hooks}
+	clone := svc.Clone()
+	if clone.Hooks == nil || clone.Hooks.PreStart == nil {
+		t.Fatalf("expected hooks to be cloned")
+	}
+
+	clone.Hooks.PreStart.Command[0] = "modified"
+	clone.Hooks.PreStart.Options["foo"] = "baz"
+
+	if svc.Hooks.PreStart.Command[0] != "/bin/true" {
+		t.Fatalf("unexpected mutation of original command: %q", svc.Hooks.PreStart.Command[0])
+	}
+	if svc.Hooks.PreStart.Options["foo"] != "bar" {
+		t.Fatalf("unexpected mutation of original options: %q", svc.Hooks.PreStart.Options["foo"])
+	}
+}
+
 func int64Ptr(v int64) *int64 {
 	return &v
 }
