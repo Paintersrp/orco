@@ -18,6 +18,8 @@ type (
 	TCPProbe      = config.TCPProbeSpec
 	CommandProbe  = config.CommandProbe
 	LogProbe      = config.LogProbeSpec
+	ServiceHooks  = config.ServiceHooks
+	LifecycleHook = config.LifecycleHookSpec
 	UpdatePolicy  = config.UpdateStrategy
 	BlueGreen     = config.BlueGreenStrategy
 	RestartPolicy = config.RestartPolicy
