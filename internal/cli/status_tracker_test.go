@@ -210,6 +210,36 @@ func TestStatusTrackerTracksPromotionStates(t *testing.T) {
 	}
 }
 
+func TestStatusTrackerReportsPromotionAbortDetails(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStatusTracker()
+	base := time.Now()
+
+	message := "promotion aborted after 2 readiness failures within 200ms"
+	err := errors.New("promotion aborted after 2 readiness failures within 200ms (last failure from replica 0: probe failed)")
+
+	tracker.Apply(engine.Event{
+		Service:   "api",
+		Replica:   0,
+		Type:      engine.EventTypeAborted,
+		Message:   message,
+		Err:       err,
+		Timestamp: base,
+	})
+
+	snap := tracker.Snapshot()["api"]
+	if snap.State != engine.EventTypeAborted {
+		t.Fatalf("expected aborted state, got %q", snap.State)
+	}
+	if !strings.Contains(snap.Message, message) {
+		t.Fatalf("expected detailed abort message, got %q", snap.Message)
+	}
+	if !strings.Contains(snap.Message, "probe failed") {
+		t.Fatalf("expected abort message to include failure context, got %q", snap.Message)
+	}
+}
+
 func TestStatusTrackerSetResourceHints(t *testing.T) {
 	t.Parallel()
 

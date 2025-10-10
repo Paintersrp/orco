@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1119,6 +1120,400 @@ func TestServiceUpdateCanaryFailureAborts(t *testing.T) {
 
 	if !abortedObserved {
 		t.Fatalf("missing aborted event: %+v", recordedCopy)
+	}
+}
+
+func TestServiceUpdateRollingAbortsAfterReadinessFailures(t *testing.T) {
+	apiInitial := &fakeInstance{waitCh: make(chan error, 1)}
+	canaryAttempt1 := &fakeInstance{waitCh: make(chan error, 1), healthCh: make(chan probe.State, 4)}
+	canaryAttempt2 := &fakeInstance{waitCh: make(chan error, 1), healthCh: make(chan probe.State, 4)}
+	rollback := &fakeInstance{waitCh: make(chan error, 1)}
+	rollbackExtra := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {apiInitial, canaryAttempt1, canaryAttempt2, rollback, rollbackExtra},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 1,
+				Command:  []string{"old"},
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 256)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected initial start, got %s", name)
+	}
+
+	apiInitial.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator up")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment handle")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 1,
+		Command:  []string{"new"},
+		Update: &stack.UpdatePolicy{
+			AbortAfterFailures: 2,
+			ObservationWindow:  stack.Duration{Duration: 10 * time.Second},
+		},
+	}
+
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[1]" {
+		t.Fatalf("expected canary restart, got %s", name)
+	}
+
+	canaryAttempt1.waitCh <- nil
+	canaryAttempt1.healthCh <- probe.State{Status: probe.StatusReady}
+	failure1 := errors.New("probe failed after update")
+	canaryAttempt1.healthCh <- probe.State{Status: probe.StatusUnready, Err: failure1}
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[2]" {
+		t.Fatalf("expected second canary restart, got %s", name)
+	}
+
+	canaryAttempt2.waitCh <- nil
+	canaryAttempt2.healthCh <- probe.State{Status: probe.StatusReady}
+	failure2 := errors.New("probe failed again")
+	canaryAttempt2.healthCh <- probe.State{Status: probe.StatusUnready, Err: failure2}
+
+	instances := []*fakeInstance{apiInitial, canaryAttempt1, canaryAttempt2, rollback, rollbackExtra}
+	parseIndex := func(name string) int {
+		start := strings.Index(name, "[")
+		end := strings.Index(name, "]")
+		if start < 0 || end < 0 || end <= start+1 {
+			return -1
+		}
+		idx, err := strconv.Atoi(name[start+1 : end])
+		if err != nil {
+			return -1
+		}
+		return idx
+	}
+
+	startErr := make(chan error, 1)
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		for {
+			select {
+			case name := <-rt.startCh:
+				t.Logf("observed restart %s", name)
+				idx := parseIndex(name)
+				if idx < 0 || idx >= len(instances) {
+					startErr <- fmt.Errorf("unexpected restart %s", name)
+					return
+				}
+				inst := instances[idx]
+				if inst == rollback {
+					inst.waitCh <- nil
+					return
+				}
+				inst.waitCh <- context.Canceled
+			case <-time.After(5 * time.Second):
+				startErr <- fmt.Errorf("timed out waiting for rollback start")
+				return
+			}
+		}
+	}()
+
+	var updateErr error
+	select {
+	case updateErr = <-updateDone:
+	case <-time.After(5 * time.Second):
+		mu.Lock()
+		snapshot := append([]Event(nil), recorded...)
+		mu.Unlock()
+		t.Fatalf("timed out waiting for update abort, recorded=%+v", snapshot)
+	}
+
+	<-startDone
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("start handler error: %v", err)
+		}
+	default:
+	}
+
+	if updateErr == nil {
+		t.Fatalf("expected update failure")
+	}
+	if !strings.Contains(updateErr.Error(), "promotion aborted after 2 readiness failures") {
+		t.Fatalf("unexpected update error: %v", updateErr)
+	}
+
+	if spec := service.handle.service; spec == nil || len(spec.Command) == 0 || spec.Command[0] != "old" {
+		t.Fatalf("expected service spec rollback, got %+v", spec)
+	}
+	if supervisorSpec := service.handle.replicas[0].supervisor.serviceSpec(); supervisorSpec == nil || len(supervisorSpec.Command) == 0 || supervisorSpec.Command[0] != "old" {
+		t.Fatalf("expected supervisor spec rollback, got %+v", supervisorSpec)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	abortedObserved := false
+	for _, evt := range recordedCopy {
+		if evt.Service != "api" || evt.Type != EventTypeAborted {
+			continue
+		}
+		abortedObserved = true
+		if !strings.Contains(evt.Message, "readiness failures") {
+			t.Fatalf("aborted event missing details: %+v", evt)
+		}
+		if evt.Err == nil || !strings.Contains(evt.Err.Error(), "last failure") {
+			t.Fatalf("aborted event missing context: %+v", evt)
+		}
+	}
+
+	if !abortedObserved {
+		t.Fatalf("expected aborted event, got %+v", recordedCopy)
+	}
+}
+
+func TestServiceUpdateRollingFailureWindowResetsCount(t *testing.T) {
+	apiInitial := &fakeInstance{waitCh: make(chan error, 1)}
+	attempt1 := &fakeInstance{waitCh: make(chan error, 1), healthCh: make(chan probe.State, 4)}
+	attempt2 := &fakeInstance{waitCh: make(chan error, 1), healthCh: make(chan probe.State, 4)}
+	attempt3 := &fakeInstance{waitCh: make(chan error, 1), healthCh: make(chan probe.State, 4)}
+	attempt4 := &fakeInstance{waitCh: make(chan error, 1)}
+
+	rt := newRecordingRuntime(map[string][]*fakeInstance{
+		"api": {apiInitial, attempt1, attempt2, attempt3, attempt4},
+	})
+
+	doc := &stack.StackFile{
+		Stack: stack.StackMeta{Name: "demo"},
+		Services: map[string]*stack.Service{
+			"api": {
+				Runtime:  "test",
+				Replicas: 1,
+				Command:  []string{"old"},
+			},
+		},
+	}
+
+	graph, err := BuildGraph(doc)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+
+	orch := NewOrchestrator(runtimelib.Registry{"test": rt})
+
+	events := make(chan Event, 256)
+	var (
+		mu       sync.Mutex
+		recorded []Event
+	)
+	drain := make(chan struct{})
+	go func() {
+		defer close(drain)
+		for evt := range events {
+			mu.Lock()
+			recorded = append(recorded, evt)
+			mu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var deployment *Deployment
+	go func() {
+		var upErr error
+		deployment, upErr = orch.Up(ctx, doc, graph, events)
+		resultCh <- upErr
+	}()
+
+	if name := waitForServiceStart(t, rt.startCh); name != "api[0]" {
+		t.Fatalf("expected initial start, got %s", name)
+	}
+
+	apiInitial.waitCh <- nil
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("orchestrator up failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for orchestrator up")
+	}
+
+	if deployment == nil {
+		t.Fatalf("expected deployment handle")
+	}
+
+	service, ok := deployment.Service("api")
+	if !ok {
+		t.Fatalf("expected api service handle")
+	}
+
+	updateDone := make(chan error, 1)
+	window := 50 * time.Millisecond
+	newSpec := &stack.Service{
+		Runtime:  "test",
+		Replicas: 1,
+		Command:  []string{"new"},
+		Update: &stack.UpdatePolicy{
+			AbortAfterFailures: 2,
+			ObservationWindow:  stack.Duration{Duration: window},
+		},
+	}
+
+	go func() {
+		updateDone <- service.Update(context.Background(), newSpec)
+	}()
+
+	waitForStart := func(expected string) {
+		select {
+		case name := <-rt.startCh:
+			if name != expected {
+				t.Fatalf("expected %s, got %s", expected, name)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout waiting for %s", expected)
+		}
+	}
+
+	waitForStart("api[1]")
+
+	attempt1.waitCh <- nil
+	attempt1.healthCh <- probe.State{Status: probe.StatusReady}
+	failure1 := errors.New("initial readiness failure")
+	attempt1.healthCh <- probe.State{Status: probe.StatusUnready, Err: failure1}
+
+	waitForStart("api[2]")
+
+	attempt2.waitCh <- nil
+	attempt2.healthCh <- probe.State{Status: probe.StatusReady}
+
+	time.Sleep(4 * window)
+
+	failure2 := errors.New("late readiness failure")
+	attempt2.healthCh <- probe.State{Status: probe.StatusUnready, Err: failure2}
+
+	waitForStart("api[3]")
+
+	attempt3.waitCh <- nil
+	attempt3.healthCh <- probe.State{Status: probe.StatusReady}
+
+	promoteDone := make(chan error, 1)
+	go func() {
+		promoteDone <- service.Promote(context.Background())
+	}()
+
+	var updateErr error
+	select {
+	case updateErr = <-updateDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for update completion")
+	}
+
+	if updateErr != nil {
+		t.Fatalf("unexpected update error: %v", updateErr)
+	}
+
+	select {
+	case promoteErr := <-promoteDone:
+		if promoteErr != nil {
+			t.Fatalf("promote failed: %v", promoteErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for promote to finish")
+	}
+
+	if spec := service.handle.service; spec == nil || len(spec.Command) == 0 || spec.Command[0] != "new" {
+		t.Fatalf("expected service spec updated, got %+v", spec)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := deployment.Stop(stopCtx, events); err != nil {
+		t.Fatalf("deployment stop: %v", err)
+	}
+
+	close(events)
+	<-drain
+
+	mu.Lock()
+	recordedCopy := append([]Event(nil), recorded...)
+	mu.Unlock()
+
+	for _, evt := range recordedCopy {
+		if evt.Service == "api" && evt.Type == EventTypeAborted {
+			t.Fatalf("unexpected aborted event: %+v", evt)
+		}
 	}
 }
 
