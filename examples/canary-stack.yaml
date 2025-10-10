@@ -21,6 +21,8 @@ services:
     update:
       strategy: canary
       promoteAfter: 30s
+      abortAfterFailures: 3
+      observationWindow: 2m
 
   web:
     runtime: process

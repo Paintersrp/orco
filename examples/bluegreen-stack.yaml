@@ -37,6 +37,8 @@ services:
         failureThreshold: 3
     update:
       strategy: blueGreen
+      abortAfterFailures: 2
+      observationWindow: 3m
       blueGreen:
         switch: proxyLabel
         drainTimeout: 30s
