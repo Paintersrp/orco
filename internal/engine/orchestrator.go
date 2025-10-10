@@ -238,6 +238,15 @@ func (h *serviceHandle) updateRolling(ctx context.Context, controller *updateCon
 		return fmt.Errorf("service %s update controller is nil", h.name)
 	}
 
+	updateCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var monitor *updateFailureMonitor
+	if threshold := abortAfterFailures(newSpec); threshold > 0 {
+		monitor = newUpdateFailureMonitor(updateCtx, cancel, threshold, observationWindowDuration(newSpec))
+		defer monitor.Stop()
+	}
+
 	canary := h.replicas[0]
 	if canary == nil || canary.supervisor == nil {
 		return fmt.Errorf("service %s replica %d supervisor unavailable", h.name, 0)
@@ -247,8 +256,20 @@ func (h *serviceHandle) updateRolling(ctx context.Context, controller *updateCon
 	updated = append(updated, canary)
 
 	canary.supervisor.UpdateServiceSpec(newSpec)
-	if err := canary.supervisor.Restart(ctx); err != nil {
-		retErr = h.abortUpdate(updated, previous, err)
+	if monitor != nil {
+		monitor.Track(canary)
+	}
+	if err := canary.supervisor.Restart(updateCtx); err != nil {
+		if msg, cause, aborted := monitorResult(monitor, err); aborted {
+			retErr = h.abortUpdateWithMessage(updated, previous, msg, cause)
+		} else {
+			retErr = h.abortUpdate(updated, previous, err)
+		}
+		return retErr
+	}
+
+	if msg, cause, aborted := monitorResult(monitor, nil); aborted {
+		retErr = h.abortUpdateWithMessage(updated, previous, msg, cause)
 		return retErr
 	}
 
@@ -258,22 +279,46 @@ func (h *serviceHandle) updateRolling(ctx context.Context, controller *updateCon
 		controller.startAutoPromote(promoteAfter)
 	}
 
-	if err := controller.wait(ctx); err != nil {
-		retErr = h.abortUpdate(updated, previous, err)
+	if err := controller.wait(updateCtx); err != nil {
+		if msg, cause, aborted := monitorResult(monitor, err); aborted {
+			retErr = h.abortUpdateWithMessage(updated, previous, msg, cause)
+		} else {
+			retErr = h.abortUpdate(updated, previous, err)
+		}
 		return retErr
 	}
 
 	for _, replica := range h.replicas[1:] {
+		if msg, cause, aborted := monitorResult(monitor, nil); aborted {
+			retErr = h.abortUpdateWithMessage(updated, previous, msg, cause)
+			return retErr
+		}
 		if replica == nil || replica.supervisor == nil {
 			retErr = h.abortUpdate(updated, previous, fmt.Errorf("service %s replica %d supervisor unavailable", h.name, replica.index))
 			return retErr
 		}
 		replica.supervisor.UpdateServiceSpec(newSpec)
+		if monitor != nil {
+			monitor.Track(replica)
+		}
 		updated = append(updated, replica)
-		if err := replica.supervisor.Restart(ctx); err != nil {
-			retErr = h.abortUpdate(updated, previous, err)
+		if err := replica.supervisor.Restart(updateCtx); err != nil {
+			if msg, cause, aborted := monitorResult(monitor, err); aborted {
+				retErr = h.abortUpdateWithMessage(updated, previous, msg, cause)
+			} else {
+				retErr = h.abortUpdate(updated, previous, err)
+			}
 			return retErr
 		}
+		if msg, cause, aborted := monitorResult(monitor, nil); aborted {
+			retErr = h.abortUpdateWithMessage(updated, previous, msg, cause)
+			return retErr
+		}
+	}
+
+	if msg, cause, aborted := monitorResult(monitor, nil); aborted {
+		retErr = h.abortUpdateWithMessage(updated, previous, msg, cause)
+		return retErr
 	}
 
 	h.service = newSpec
@@ -493,6 +538,10 @@ func (r *replicaHandle) awaitReady(ctx context.Context) error {
 }
 
 func (h *serviceHandle) abortUpdate(updated []*replicaHandle, previous *stack.Service, cause error) error {
+	return h.abortUpdateWithMessage(updated, previous, "promotion aborted", cause)
+}
+
+func (h *serviceHandle) abortUpdateWithMessage(updated []*replicaHandle, previous *stack.Service, message string, cause error) error {
 	if previous != nil && len(updated) > 0 {
 		h.rollback(updated, previous)
 	}
@@ -500,8 +549,144 @@ func (h *serviceHandle) abortUpdate(updated []*replicaHandle, previous *stack.Se
 	if len(updated) > 0 && updated[0] != nil {
 		replicaIdx = updated[0].index
 	}
-	sendEvent(h.events, h.name, replicaIdx, EventTypeAborted, "promotion aborted", 0, ReasonAborted, cause)
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		trimmed = "promotion aborted"
+	}
+	sendEvent(h.events, h.name, replicaIdx, EventTypeAborted, trimmed, 0, ReasonAborted, cause)
 	return fmt.Errorf("service %s promotion failed: %w", h.name, cause)
+}
+
+func abortAfterFailures(spec *stack.Service) int {
+	if spec == nil || spec.Update == nil {
+		return 0
+	}
+	return spec.Update.AbortAfterFailures
+}
+
+func observationWindowDuration(spec *stack.Service) time.Duration {
+	if spec == nil || spec.Update == nil {
+		return 0
+	}
+	return spec.Update.ObservationWindow.Duration
+}
+
+func monitorResult(m *updateFailureMonitor, err error) (string, error, bool) {
+	if m == nil {
+		return "", nil, false
+	}
+	if msg, cause, triggered := m.Result(); triggered {
+		return msg, cause, true
+	}
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		if msg, cause, triggered := m.Result(); triggered {
+			return msg, cause, true
+		}
+	}
+	return "", nil, false
+}
+
+type updateFailureMonitor struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	propagate context.CancelFunc
+	window    time.Duration
+	thresh    int
+
+	mu        sync.Mutex
+	failures  []time.Time
+	message   string
+	cause     error
+	triggered bool
+
+	wg sync.WaitGroup
+}
+
+func newUpdateFailureMonitor(ctx context.Context, propagate context.CancelFunc, threshold int, window time.Duration) *updateFailureMonitor {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	monitorCtx, cancel := context.WithCancel(ctx)
+	return &updateFailureMonitor{ctx: monitorCtx, cancel: cancel, propagate: propagate, window: window, thresh: threshold}
+}
+
+func (m *updateFailureMonitor) Track(rep *replicaHandle) {
+	if m == nil || rep == nil || rep.supervisor == nil {
+		return
+	}
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		for {
+			err := rep.awaitFailure(m.ctx)
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if m.ctx.Err() != nil {
+					return
+				}
+			}
+			if m.recordFailure(rep.index, err) {
+				return
+			}
+		}
+	}()
+}
+
+func (m *updateFailureMonitor) recordFailure(replica int, failure error) bool {
+	now := time.Now()
+	m.mu.Lock()
+	if m.triggered {
+		m.mu.Unlock()
+		return true
+	}
+	if m.window > 0 && len(m.failures) > 0 {
+		cutoff := now.Add(-m.window)
+		kept := m.failures[:0]
+		for _, ts := range m.failures {
+			if ts.After(cutoff) {
+				kept = append(kept, ts)
+			}
+		}
+		m.failures = kept
+	}
+	m.failures = append(m.failures, now)
+	reached := len(m.failures) >= m.thresh
+	if reached {
+		if m.window > 0 {
+			m.message = fmt.Sprintf("promotion aborted after %d readiness failures within %s", m.thresh, m.window)
+		} else {
+			m.message = fmt.Sprintf("promotion aborted after %d readiness failures", m.thresh)
+		}
+		m.cause = fmt.Errorf("%s (last failure from replica %d: %w)", m.message, replica, failure)
+		m.triggered = true
+	}
+	m.mu.Unlock()
+	if reached {
+		m.cancel()
+		if m.propagate != nil {
+			m.propagate()
+		}
+	}
+	return reached
+}
+
+func (m *updateFailureMonitor) Result() (string, error, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.triggered || m.cause == nil {
+		return "", nil, false
+	}
+	return m.message, m.cause, true
+}
+
+func (m *updateFailureMonitor) Stop() {
+	if m == nil {
+		return
+	}
+	m.cancel()
+	m.wg.Wait()
 }
 
 func (h *serviceHandle) rollback(replicas []*replicaHandle, previous *stack.Service) {
