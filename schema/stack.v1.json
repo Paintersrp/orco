@@ -386,6 +386,13 @@
         "promoteAfter": {
           "$ref": "#/$defs/duration"
         },
+        "abortAfterFailures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observationWindow": {
+          "$ref": "#/$defs/duration"
+        },
         "blueGreen": {
           "$ref": "#/$defs/blueGreenStrategy"
         }

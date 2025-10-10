@@ -41,6 +41,8 @@ services:
       strategy: rolling
       maxUnavailable: 0
       maxSurge: 1
+      abortAfterFailures: 4
+      observationWindow: 5m
     replicas: 1
 
   api:

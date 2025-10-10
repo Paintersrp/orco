@@ -13,4 +13,9 @@ Optional settings under `update.blueGreen` provide additional control:
 - `rollbackWindow`: how long to watch green replicas for regressions and automatically roll back if a failure occurs.
 - `switch`: the traffic switching mode (`ports` or `proxyLabel`).
 
+In addition to the blue/green specific knobs, all strategies respect two global safeguards:
+
+- `update.abortAfterFailures`: aborts the rollout after the configured number of failed promotions.
+- `update.observationWindow`: sets the rolling time window used to count those failures.
+
 If verification fails or a regression occurs during the rollback window, Orco aborts the update, tears down the green replica set, and leaves the blue replicas serving traffic. See `examples/bluegreen-stack.yaml` for a reference manifest.

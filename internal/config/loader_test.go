@@ -44,6 +44,9 @@ services:
         pattern: "ready"
         sources: [stderr]
       expression: http || log
+    update:
+      abortAfterFailures: 2
+      observationWindow: 45s
 `)
 	if err := os.WriteFile(stackPath, manifest, 0o644); err != nil {
 		t.Fatalf("write stack: %v", err)
@@ -102,6 +105,15 @@ services:
 	}
 	if got, want := svc.Health.SuccessThreshold, 1; got != want {
 		t.Fatalf("success threshold mismatch: got %d want %d", got, want)
+	}
+	if svc.Update == nil {
+		t.Fatalf("update strategy not loaded")
+	}
+	if got, want := svc.Update.AbortAfterFailures, 2; got != want {
+		t.Fatalf("abortAfterFailures mismatch: got %d want %d", got, want)
+	}
+	if got, want := svc.Update.ObservationWindow.Duration, 45*time.Second; got != want {
+		t.Fatalf("observationWindow mismatch: got %v want %v", got, want)
 	}
 }
 

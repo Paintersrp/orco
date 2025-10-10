@@ -205,6 +205,45 @@ func TestStackValidateBlueGreenSwitchRejectsUnknownValue(t *testing.T) {
 	}
 }
 
+func TestStackValidateUpdateRejectsNegativeValues(t *testing.T) {
+	mkStack := func() *Stack {
+		return &Stack{
+			Version: "0.1",
+			Stack:   StackMeta{Name: "demo"},
+			Services: map[string]*ServiceSpec{
+				"api": {
+					Runtime:  "docker",
+					Image:    "ghcr.io/demo/api:latest",
+					Replicas: 1,
+					Health: &ProbeSpec{
+						HTTP: &HTTPProbeSpec{URL: "http://localhost:8080/health"},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("abortAfterFailures", func(t *testing.T) {
+		stack := mkStack()
+		stack.Services["api"].Update = &UpdateStrategy{AbortAfterFailures: -1}
+		err := stack.Validate()
+		if err == nil || !strings.Contains(err.Error(), "abortAfterFailures") {
+			t.Fatalf("expected abortAfterFailures error, got %v", err)
+		}
+	})
+
+	t.Run("observationWindow", func(t *testing.T) {
+		stack := mkStack()
+		stack.Services["api"].Update = &UpdateStrategy{
+			ObservationWindow: Duration{Duration: -time.Second, explicit: true},
+		}
+		err := stack.Validate()
+		if err == nil || !strings.Contains(err.Error(), "observationWindow") {
+			t.Fatalf("expected observationWindow error, got %v", err)
+		}
+	})
+}
+
 func blueGreenTestStack(switchValue string, t *testing.T) *Stack {
 	t.Helper()
 	return &Stack{

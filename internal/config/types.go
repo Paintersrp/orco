@@ -217,11 +217,13 @@ type LogProbeSpec struct {
 
 // UpdateStrategy controls rolling update behaviour.
 type UpdateStrategy struct {
-	Strategy       string             `yaml:"strategy"`
-	MaxUnavailable int                `yaml:"maxUnavailable"`
-	MaxSurge       int                `yaml:"maxSurge"`
-	PromoteAfter   Duration           `yaml:"promoteAfter"`
-	BlueGreen      *BlueGreenStrategy `yaml:"blueGreen"`
+	Strategy           string             `yaml:"strategy"`
+	MaxUnavailable     int                `yaml:"maxUnavailable"`
+	MaxSurge           int                `yaml:"maxSurge"`
+	PromoteAfter       Duration           `yaml:"promoteAfter"`
+	AbortAfterFailures int                `yaml:"abortAfterFailures"`
+	ObservationWindow  Duration           `yaml:"observationWindow"`
+	BlueGreen          *BlueGreenStrategy `yaml:"blueGreen"`
 }
 
 // BlueGreenStrategy captures configuration specific to the blue/green update strategy.
@@ -383,6 +385,12 @@ func (s *Stack) Validate() error {
 			return fmt.Errorf("%s: must be at least 1", serviceField(name, "replicas"))
 		}
 		if svc.Update != nil {
+			if svc.Update.AbortAfterFailures < 0 {
+				return fmt.Errorf("%s: must be non-negative", serviceField(name, "update", "abortAfterFailures"))
+			}
+			if svc.Update.ObservationWindow.IsSet() && svc.Update.ObservationWindow.Duration < 0 {
+				return fmt.Errorf("%s: must be non-negative", serviceField(name, "update", "observationWindow"))
+			}
 			strategy := strings.TrimSpace(strings.ToLower(svc.Update.Strategy))
 			switch strategy {
 			case "", "rolling", "canary":
@@ -654,10 +662,12 @@ func (s *ServiceSpec) Clone() *ServiceSpec {
 	}
 	if s.Update != nil {
 		cp.Update = &UpdateStrategy{
-			Strategy:       s.Update.Strategy,
-			MaxUnavailable: s.Update.MaxUnavailable,
-			MaxSurge:       s.Update.MaxSurge,
-			PromoteAfter:   s.Update.PromoteAfter,
+			Strategy:           s.Update.Strategy,
+			MaxUnavailable:     s.Update.MaxUnavailable,
+			MaxSurge:           s.Update.MaxSurge,
+			PromoteAfter:       s.Update.PromoteAfter,
+			AbortAfterFailures: s.Update.AbortAfterFailures,
+			ObservationWindow:  s.Update.ObservationWindow,
 		}
 		if s.Update.BlueGreen != nil {
 			cp.Update.BlueGreen = &BlueGreenStrategy{
